@@ -1,6 +1,8 @@
 """
 Dashboard Resumen - Modernización RF (R4 Bogotá)
-Sube el archivo de control (.xlsx) y visualiza la pestaña "Resumen".
+Dos formas de cargar los datos:
+  1) Lista de sitios + export de RF + export de baseline (la app calcula todo), o
+  2) El Excel completo de control (lee la pestaña "Resumen" y recalcula desde "Sitios").
 
 Ejecutar:
     pip install -r requirements.txt
@@ -9,6 +11,7 @@ Ejecutar:
 
 import datetime
 import io
+import unicodedata
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -241,6 +244,23 @@ def a_fecha(v):
     return pd.NaT
 
 
+def asignar_etapa(det: pd.DataFrame) -> pd.Series:
+    """Último hito que cumple cada sitio (cada sitio queda en una sola etapa)."""
+    def etapa(r):
+        if r["ok_INSRV"]:
+            return ETAPAS[5][0]
+        if r["ok_INTEGRADOS"]:
+            return ETAPAS[4][0]
+        if r["ok_INSTALADOS"]:
+            return ETAPAS[3][0]
+        if r["ok_TSS APROBADOS"]:
+            return ETAPAS[2][0]
+        if r["ok_TSS CARGADOS"]:
+            return ETAPAS[1][0]
+        return ETAPAS[0][0]
+    return det.apply(etapa, axis=1)
+
+
 def construir_detalle(raw_sitios: pd.DataFrame, territorios: list, proyecto: str) -> pd.DataFrame:
     """Una fila por sitio del proyecto, con su territorio, fechas y si cumple cada hito."""
     s = raw_sitios.iloc[1:]
@@ -262,20 +282,7 @@ def construir_detalle(raw_sitios: pd.DataFrame, territorios: list, proyecto: str
     det["Autorización"] = s[3].map(lambda x: x if isinstance(x, str) else "")
     det["Scope"] = s[21].map(lambda x: x if isinstance(x, str) else "") if 21 in s.columns else ""
 
-    def etapa(r):
-        if r["ok_INSRV"]:
-            return ETAPAS[5][0]
-        if r["ok_INTEGRADOS"]:
-            return ETAPAS[4][0]
-        if r["ok_INSTALADOS"]:
-            return ETAPAS[3][0]
-        if r["ok_TSS APROBADOS"]:
-            return ETAPAS[2][0]
-        if r["ok_TSS CARGADOS"]:
-            return ETAPAS[1][0]
-        return ETAPAS[0][0]
-
-    det["Etapa"] = det.apply(etapa, axis=1)
+    det["Etapa"] = asignar_etapa(det)
     return det.reset_index(drop=True)
 
 
@@ -343,6 +350,265 @@ def layout_base(fig, alto=380):
     return fig
 
 
+
+# ---------------------------------------------------------------------------
+# Modo "lista de sitios + RF + baseline"
+# ---------------------------------------------------------------------------
+RF_REQ = ("Sitio", "Id", "MasterPlan")
+BL_REQ = ("Sitio", "Territorio Comercial")
+# Hito -> nombres posibles (normalizados) de la columna de RF con su fecha
+HITO_RF = {
+    "TSS CARGADOS": ("tss",),
+    "TSS APROBADOS": ("tss ok",),
+    "OBRA CIVIL OK": ("cw lista",),
+    "DISEÑO TX": ("orden tx",),
+    "RFIC-OK": ("rfic",),
+    "INSTALADOS": ("fecha instalacion",),
+    "INTEGRADOS": ("fecha integracion",),
+    "INSRV": ("fecha insrv", "fecha inservice"),
+}
+# Hito -> columna de fecha que se muestra en el detalle
+HITO_A_DETALLE = {"TSS CARGADOS": "Fecha TSS", "TSS APROBADOS": "TSS OK",
+                  "OBRA CIVIL OK": "Obra civil OK", "DISEÑO TX": "Diseño TX",
+                  "RFIC-OK": "RFIC", "INSTALADOS": "Instalación",
+                  "INTEGRADOS": "Integración", "INSRV": "InSrv"}
+ORDEN_HITOS = ["Total Sitios", "TSS Cargados", "TSS Aprobados", "Obra Civil Ok", "Diseño TX",
+               "RFIC-OK", "Instalados", "Integrados", "InSrv", "CARGA NEGADOS", "COSITE"]
+ORDEN_TERR = ["Bogota Oriente", "Bogota Norte", "Bogota Sur", "Bogota Occidente"]
+
+
+def _plano(t) -> str:
+    """Minúsculas, sin tildes y sin espacios repetidos (para comparar nombres)."""
+    s = unicodedata.normalize("NFKD", str(t))
+    return " ".join("".join(ch for ch in s if not unicodedata.combining(ch)).lower().split())
+
+
+def mapa_cols(df: pd.DataFrame) -> dict:
+    m = {}
+    for c in df.columns:
+        m.setdefault(_plano(c), c)
+    return m
+
+
+def decodificar(contenido: bytes) -> str:
+    for enc in ("utf-8-sig", "latin-1"):
+        try:
+            return contenido.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return contenido.decode("utf-8", errors="ignore")
+
+
+def limpiar_sitios(valores) -> list:
+    """Quita vacíos, encabezado y repetidos (sin importar tildes/mayúsculas)."""
+    vistos, salida = set(), []
+    for v in valores:
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            continue
+        n = str(v).strip()
+        k = _plano(n)
+        if not n or k in ("nan", "sitio", "sitios", "nombre", "none") or k in vistos:
+            continue
+        vistos.add(k)
+        salida.append(n)
+    return salida
+
+
+@st.cache_data(show_spinner=False)
+def leer_lista(contenido: bytes, nombre: str) -> tuple:
+    n = nombre.lower()
+    if n.endswith((".xlsx", ".xlsm")):
+        x = pd.ExcelFile(io.BytesIO(contenido), engine="openpyxl")
+        t = pd.read_excel(x, x.sheet_names[0], header=None)
+        col = 0
+        fila0 = [_plano(v) for v in t.iloc[0].tolist()] if len(t) else []
+        if "sitio" in fila0:
+            col = fila0.index("sitio")
+        return tuple(limpiar_sitios(t.iloc[:, col].tolist()))
+    lineas = decodificar(contenido).splitlines()
+    if n.endswith(".csv"):
+        import re
+        filas = [re.split(r"[;\t,]", ln) for ln in lineas]
+        col = 0
+        if filas and "sitio" in [_plano(c) for c in filas[0]]:
+            col = [_plano(c) for c in filas[0]].index("sitio")
+        return tuple(limpiar_sitios([f[col] if len(f) > col else "" for f in filas]))
+    return tuple(limpiar_sitios(lineas))
+
+
+def _convertir_fechas_texto(df: pd.DataFrame) -> pd.DataFrame:
+    """Los exports de texto (csv/html) traen las fechas como texto: se convierten a fecha."""
+    conocidas = {n for nombres in HITO_RF.values() for n in nombres}
+    for c in df.columns:
+        if _plano(c) in conocidas:
+            df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True, format="mixed")
+    return df
+
+
+def tipo_contenido(contenido: bytes) -> str:
+    """Detecta el formato por el contenido (no por la extensión): muchos '.xls' de los
+    sistemas internos son en realidad tablas HTML."""
+    if contenido[:4] == b"PK\x03\x04":
+        return "xlsx"
+    if contenido[:4] == b"\xd0\xcf\x11\xe0":
+        return "xls"
+    muestra = decodificar(contenido[:200000]).lower()
+    return "html" if ("<table" in muestra or "<html" in muestra) else "csv"
+
+
+@st.cache_data(show_spinner="Leyendo archivo…")
+def leer_tabla(contenido: bytes, nombre: str, hojas_pref: tuple, requeridas: tuple):
+    """Lee un export (xlsx, xls, csv o tabla HTML). Busca la fila de encabezados y la hoja."""
+    req = [_plano(r) for r in requeridas]
+
+    def fila_encabezado(crudo):
+        for i in range(min(15, len(crudo))):
+            celdas = {_plano(c) for c in crudo.iloc[i].tolist() if pd.notna(c)}
+            if all(r in celdas for r in req):
+                return i
+        return None
+
+    tipo = tipo_contenido(contenido)
+    if tipo in ("csv", "html"):
+        if tipo == "csv":
+            crudos = [pd.read_csv(io.StringIO(decodificar(contenido)), sep=None,
+                                  engine="python", header=None, dtype=object)]
+        else:
+            try:
+                tablas = pd.read_html(io.StringIO(decodificar(contenido)), header=0)
+            except ImportError as e:
+                raise ValueError("Falta la librería 'lxml' para leer este tipo de archivo "
+                                 "(agrégala a requirements.txt).") from e
+            except ValueError as e:
+                raise ValueError(f"'{nombre}' no contiene ninguna tabla legible.") from e
+            crudos = []
+            for t in tablas:
+                cab = pd.DataFrame([[str(c) for c in t.columns]])
+                t = t.copy()
+                t.columns = range(t.shape[1])
+                crudos.append(pd.concat([cab, t.astype(object)], ignore_index=True))
+        for crudo in crudos:
+            i = fila_encabezado(crudo)
+            if i is not None:
+                df = crudo.iloc[i + 1:].copy()
+                df.columns = [str(c) for c in crudo.iloc[i].tolist()]
+                df = df.loc[:, ~pd.Index(df.columns).duplicated()].reset_index(drop=True)
+                return _convertir_fechas_texto(df)
+    else:
+        try:
+            x = pd.ExcelFile(io.BytesIO(contenido))
+        except ImportError as e:
+            raise ValueError("Este es un Excel antiguo (.xls binario) y falta la librería "
+                             "'xlrd'. Guárdalo como .xlsx o agrega xlrd a requirements.txt.") from e
+        pref = [_plano(h) for h in hojas_pref]
+        hojas = ([h for h in x.sheet_names if _plano(h) in pref]
+                 + [h for h in x.sheet_names if _plano(h) not in pref])
+        for h in hojas:
+            i = fila_encabezado(pd.read_excel(x, sheet_name=h, header=None, nrows=15))
+            if i is not None:
+                return pd.read_excel(x, sheet_name=h, header=i)
+    raise ValueError(f"No encontré las columnas {', '.join(requeridas)} en '{nombre}'. "
+                     "Revisa que sea el export correcto.")
+
+
+@st.cache_data(show_spinner=False)
+def planes_disponibles(rf_bytes: bytes, rf_nombre: str, sitios: tuple) -> list:
+    rf = leer_tabla(rf_bytes, rf_nombre, ("RF",), RF_REQ)
+    m = mapa_cols(rf)
+    claves = {_plano(x) for x in sitios}
+    mask = rf[m["sitio"]].map(_plano).isin(claves)
+    vc = rf.loc[mask, m["masterplan"]].dropna().astype(str).str.strip().value_counts()
+    return list(vc.index)
+
+
+@st.cache_data(show_spinner="Calculando…")
+def procesar_archivos(rf_bytes, rf_nombre, bl_bytes, bl_nombre, sitios: tuple, planes: tuple):
+    """Arma el resumen por territorio y el detalle por sitio desde RF + baseline."""
+    rf = leer_tabla(rf_bytes, rf_nombre, ("RF",), RF_REQ)
+    bl = leer_tabla(bl_bytes, bl_nombre, ("baseline",), BL_REQ)
+    mrf, mbl = mapa_cols(rf), mapa_cols(bl)
+    claves = [_plano(x) for x in sitios]
+
+    # Territorio de cada sitio (baseline)
+    t = pd.DataFrame({"k": bl[mbl["sitio"]].map(_plano),
+                      "t": bl[mbl["territorio comercial"]].map(
+                          lambda x: str(x).strip() if pd.notna(x) else "")})
+    t = t[t["t"] != ""].drop_duplicates("k").set_index("k")["t"]
+    en_baseline = {_plano(x) for x in bl[mbl["sitio"]].dropna()}
+    terr_sitio = [t.get(k, SIN_TERRITORIO) for k in claves]
+
+    # Trabajos de RF de esos sitios y de los MasterPlan elegidos
+    r = rf.copy()
+    r["_k"] = r[mrf["sitio"]].map(_plano)
+    r["_p"] = r[mrf["masterplan"]].astype(str).str.strip()
+    r = r[r["_k"].isin(set(claves)) & r["_p"].isin(set(planes))].copy()
+    n_jobs = r.groupby("_k").size()
+
+    det = pd.DataFrame({"Sitio": list(sitios), "Territorio": terr_sitio})
+    faltantes = []
+    for clave_h, candidatos in HITO_RF.items():
+        col = next((mrf[c] for c in candidatos if c in mrf), None)
+        if col is None:
+            faltantes.append(f"{HITO_A_DETALLE[clave_h]} (columna '{candidatos[0]}')")
+            det["ok_" + clave_h] = False
+            det[HITO_A_DETALLE[clave_h]] = pd.NaT
+            continue
+        f = pd.DataFrame({"_k": r["_k"], "f": r[col].map(a_fecha)})
+        ag = f.groupby("_k")["f"].agg(["count", "max"])
+        ok = (ag["count"] == n_jobs.reindex(ag.index)) & (ag["count"] > 0)
+        det["ok_" + clave_h] = [bool(ok.get(k, False)) for k in claves]
+        det[HITO_A_DETALLE[clave_h]] = [ag["max"].get(k, pd.NaT) if ok.get(k, False) else pd.NaT
+                                        for k in claves]
+    det["ok_TOTAL SITIOS"] = True
+
+    # Carga: negado / cosite
+    ccol = mrf.get("carga")
+    if ccol:
+        r["_c"] = r[ccol].astype(str).str.strip().str.upper()
+        neg = r.assign(x=r["_c"] == "NEGADO").groupby("_k")["x"].any()
+        cos = r.assign(x=r["_c"] == "COSITE").groupby("_k")["x"].any()
+        primera = r.groupby("_k")[ccol].first()
+    else:
+        neg = cos = pd.Series(dtype=bool)
+        primera = pd.Series(dtype=object)
+        faltantes.append("Carga (columna 'carga')")
+    det["ok_CARGA NEGADOS"] = [bool(neg.get(k, False)) for k in claves]
+    det["ok_COSITE"] = [bool(cos.get(k, False)) and not bool(neg.get(k, False)) for k in claves]
+    det["Carga"] = ["Negado" if neg.get(k, False) else "Cosite" if cos.get(k, False)
+                    else (str(primera.get(k, "")) if pd.notna(primera.get(k, "")) else "")
+                    for k in claves]
+    acol = mrf.get("alcance")
+    prim_a = r.groupby("_k")[acol].first() if acol else pd.Series(dtype=object)
+    det["Autorización"] = [str(prim_a.get(k, "")) if pd.notna(prim_a.get(k, "")) else ""
+                           for k in claves]
+    det["Scope"] = ""
+    det["Trabajos"] = [int(n_jobs.get(k, 0)) for k in claves]
+    det["Etapa"] = asignar_etapa(det)
+
+    # Resumen por territorio
+    terrs = [x for x in ORDEN_TERR if x in set(terr_sitio)]
+    terrs += sorted(x for x in set(terr_sitio) if x not in ORDEN_TERR and x != SIN_TERRITORIO)
+    if SIN_TERRITORIO in set(terr_sitio):
+        terrs.append(SIN_TERRITORIO)
+    filas = {h: {tt: int((det["ok_" + _norm(h)] & (det["Territorio"] == tt)).sum())
+                 for tt in terrs} for h in ORDEN_HITOS}
+    df = pd.DataFrame.from_dict(filas, orient="index")[terrs]
+    df["Total"] = df[terrs].sum(axis=1)
+    df.index.name = "Hito"
+
+    sin_terr = pd.DataFrame({
+        "Sitio": [x for x, tt in zip(sitios, terr_sitio) if tt == SIN_TERRITORIO],
+        "Motivo": ["No aparece en baseline" if _plano(x) not in en_baseline
+                   else "En baseline, pero sin 'Territorio Comercial'"
+                   for x, tt in zip(sitios, terr_sitio) if tt == SIN_TERRITORIO]})
+    calidad = {
+        "n_sitios": len(sitios), "n_trabajos": int(len(r)), "planes": list(planes),
+        "sin_trabajos": det.loc[det["Trabajos"] == 0, ["Sitio", "Territorio"]].reset_index(drop=True),
+        "faltantes": faltantes,
+    }
+    return df, det, sin_terr, calidad
+
+
 # ---------------------------------------------------------------------------
 # Detalle de sitios al hacer clic
 # ---------------------------------------------------------------------------
@@ -382,7 +648,7 @@ def panel_detalle(prefijo):
         st.markdown('<p class="panel-t">🔍 Sitios detrás de cada número</p>'
                     '<p class="panel-s">Haz clic en una barra de los gráficos de arriba, '
                     'o elige aquí qué quieres ver.</p>', unsafe_allow_html=True)
-        opciones_ver = list(df_excel.index) + [PREFIJO_ETAPA + e for e, _ in ETAPAS]
+        opciones_ver = list(df.index) + [PREFIJO_ETAPA + e for e, _ in ETAPAS]
         terr_disp = [t for t in sel_terr]
         opciones_terr = ["Todos"] + terr_disp
         for k, ops in ((f"{prefijo}_ver", opciones_ver), (f"{prefijo}_terr", opciones_terr)):
@@ -417,15 +683,18 @@ def panel_detalle(prefijo):
             titulo_lista = ver if es_total else f"{ver} · {modo.lower()}"
 
         columnas = ["Sitio", "Territorio", "Etapa"]
+        if "Trabajos" in d.columns:
+            columnas.append("Trabajos")
         if col_fecha:
             columnas.append(col_fecha)
         columnas += [c for c in COLS_DETALLE if c != col_fecha]
-        columnas += ["Carga", "Autorización", "Scope"]
+        columnas += [c for c in ("Carga", "Autorización", "Scope")
+                     if (d[c].astype(str).str.strip() != "").any()]
         d = d[columnas].sort_values(["Territorio", "Sitio"])
 
         st.markdown(f"**{len(d):,} sitio(s)** · {titulo_lista}"
                     + ("" if terr_sel == "Todos" else f" · {terr_sel}"))
-        if fuente == FUENTE_EXCEL:
+        if fuente == FUENTE_EXCEL and not modo_arch:
             st.caption("La lista sale de la pestaña Sitios con el cálculo corregido; puede "
                        "diferir del Resumen del Excel en las celdas con error.")
         if d.empty:
@@ -445,37 +714,99 @@ def panel_detalle(prefijo):
 # ---------------------------------------------------------------------------
 # Interfaz
 # ---------------------------------------------------------------------------
-with st.sidebar:
-    st.header("📂 Archivo")
-    archivo = st.file_uploader("Sube el control (.xlsx)", type=["xlsx", "xlsm"])
-    st.caption("Se lee la pestaña **Resumen**. El archivo no se guarda en ningún lado; "
-               "solo se procesa en esta sesión.")
-
-st.title("📡 Dashboard Resumen · Modernización")
-
-if archivo is None:
-    st.info("Sube el archivo de control en la barra lateral para ver el resumen.")
-    st.stop()
-
-try:
-    df_excel, df_recalc, sin_terr, det, terr_excel, total_col, info, error_recalc = cargar(archivo.getvalue())
-except Exception as e:  # noqa: BLE001
-    st.error(f"No se pudo leer el archivo: {e}")
-    st.stop()
-
+MODO_ARCHIVOS = "Lista de sitios + RF + baseline"
+MODO_EXCEL = "Excel completo de control"
 FUENTE_RECALC = "Recalculado (corregido)"
 FUENTE_EXCEL = "Resumen del Excel"
 
 with st.sidebar:
-    st.header("🧮 Fuente de datos")
-    if df_recalc is not None:
-        fuente = st.radio("Mostrar", [FUENTE_RECALC, FUENTE_EXCEL], index=0,
-                          help="Recalculado: cuenta los sitios directamente en la pestaña "
-                               "Sitios con las mismas reglas del Resumen, sin los errores "
-                               "de fórmula. Resumen del Excel: los valores tal cual.")
+    st.header("📂 Datos")
+    modo = st.radio("¿Qué vas a subir?", [MODO_ARCHIVOS, MODO_EXCEL], key="modo_carga")
+    modo_arch = modo == MODO_ARCHIVOS
+    if modo_arch:
+        f_sitios = st.file_uploader("1 · Lista de sitios (.csv, .txt, .xlsx)",
+                                    type=["csv", "txt", "xlsx", "xlsm"], key="up_sitios")
+        txt_sitios = st.text_area("…o pega los nombres (uno por línea)", height=90,
+                                  key="txt_sitios")
+        f_rf = st.file_uploader("2 · Export de RF (.xls, .xlsx, .csv)", type=["xlsx", "xlsm", "xls", "csv"],
+                                key="up_rf")
+        f_bl = st.file_uploader("3 · Export de baseline (.xls, .xlsx, .csv)",
+                                type=["xlsx", "xlsm", "xls", "csv"], key="up_bl")
+        proyecto = st.text_input("Nombre del proyecto", "MODERNIZACION_2026", key="proy")
+        region_txt = st.text_input("Región", "R4", key="reg")
+        st.caption("Los archivos no se guardan en ningún lado; solo se procesan en esta sesión.")
     else:
-        fuente = FUENTE_EXCEL
-        st.warning(error_recalc)
+        archivo = st.file_uploader("Sube el control (.xlsx)", type=["xlsx", "xlsm"])
+        st.caption("Se lee la pestaña **Resumen** y se recalcula desde **Sitios**. El archivo "
+                   "no se guarda en ningún lado.")
+
+st.title("📡 Dashboard Resumen · Modernización")
+
+df_excel = sin_terr = det = calidad = error_recalc = None
+diferencias = []
+
+if modo_arch:
+    sitios = list(leer_lista(f_sitios.getvalue(), f_sitios.name)) if f_sitios else []
+    sitios = limpiar_sitios(sitios + txt_sitios.splitlines())
+    if not (f_rf and f_bl and sitios):
+        faltan = [n for n, ok in (("la lista de sitios", bool(sitios)), ("el export de RF", bool(f_rf)),
+                                  ("el export de baseline", bool(f_bl))) if not ok]
+        st.info("Para empezar sube " + ", ".join(faltan) + " en la barra lateral.")
+        st.stop()
+    with st.sidebar:
+        st.caption(f"✅ {len(sitios)} sitios en la lista")
+    try:
+        planes_disp = planes_disponibles(f_rf.getvalue(), f_rf.name, tuple(sitios))
+    except Exception as e:  # noqa: BLE001
+        st.error(f"No se pudo leer RF: {e}")
+        st.stop()
+    if not planes_disp:
+        st.error("Ninguno de los sitios de la lista aparece en el export de RF. "
+                 "Revisa que los nombres coincidan con la columna Sitio de RF.")
+        st.stop()
+    with st.sidebar:
+        st.header("🗂️ Trabajos a contar")
+        planes_sel = st.multiselect(
+            "MasterPlan incluidos", planes_disp,
+            default=[p for p in planes_disp if "modern" in _plano(p)] or planes_disp,
+            key="planes", help="Solo los trabajos de estos MasterPlan cuentan. Un sitio cumple "
+                               "un hito cuando todos sus trabajos tienen fecha.")
+    if not planes_sel:
+        st.warning("Elige al menos un MasterPlan.")
+        st.stop()
+    try:
+        df_recalc, det, sin_terr, calidad = procesar_archivos(
+            f_rf.getvalue(), f_rf.name, f_bl.getvalue(), f_bl.name,
+            tuple(sitios), tuple(planes_sel))
+    except Exception as e:  # noqa: BLE001
+        st.error(f"No se pudo procesar: {e}")
+        st.stop()
+    total_col = proyecto.strip() or "Proyecto"
+    info = {"region": region_txt.strip() or "—", "total_col": total_col, "ref_encabezado": None}
+    terr_excel = [c for c in df_recalc.columns if c != "Total"]
+    fuente = FUENTE_RECALC
+    origen = "lista de sitios + RF + baseline"
+else:
+    if archivo is None:
+        st.info("Sube el archivo de control en la barra lateral para ver el resumen.")
+        st.stop()
+    try:
+        df_excel, df_recalc, sin_terr, det, terr_excel, total_col, info, error_recalc = cargar(archivo.getvalue())
+    except Exception as e:  # noqa: BLE001
+        st.error(f"No se pudo leer el archivo: {e}")
+        st.stop()
+
+    with st.sidebar:
+        st.header("🧮 Fuente de datos")
+        if df_recalc is not None:
+            fuente = st.radio("Mostrar", [FUENTE_RECALC, FUENTE_EXCEL], index=0,
+                              help="Recalculado: cuenta los sitios directamente en la pestaña "
+                                   "Sitios con las mismas reglas del Resumen, sin los errores "
+                                   "de fórmula. Resumen del Excel: los valores tal cual.")
+        else:
+            fuente = FUENTE_EXCEL
+            st.warning(error_recalc)
+    origen = f"`{archivo.name}`"
 
 if fuente == FUENTE_RECALC:
     df = df_recalc
@@ -485,8 +816,7 @@ else:
     territorios = terr_excel
 
 # ---- Comparación Excel vs recalculado ---------------------------------------
-diferencias = []
-if df_recalc is not None:
+if df_excel is not None and df_recalc is not None:
     for h in df_excel.index:
         for t in terr_excel:
             a, b = int(df_excel.loc[h, t]), int(df_recalc.loc[h, t])
@@ -500,7 +830,7 @@ if df_recalc is not None:
             diferencias.append({"Hito": h, "Columna": "Total", "Excel": a, "Recalculado": b})
 
 st.caption(f"Región **{info['region']}** · Proyecto **{total_col}** · "
-           f"Fuente: **{fuente}** · Archivo: `{archivo.name}`")
+           + (f"Fuente: **{origen}**" if modo_arch else f"Fuente: **{fuente}** · Archivo: {origen}"))
 
 # Filtro de territorios
 with st.sidebar:
@@ -538,8 +868,17 @@ if fuente == FUENTE_EXCEL and diferencias:
     alertas.append(f"Hay **{len(diferencias)}** celda(s) del Resumen del Excel con errores de "
                    f"fórmula. Cambia a *{FUENTE_RECALC}* o mira la pestaña 🔧 Correcciones.")
 if fuente == FUENTE_RECALC and SIN_TERRITORIO in df.columns:
-    alertas.append(f"Hay sitios del proyecto sin región en la pestaña Sitios; se muestran en "
-                   f"la columna **{SIN_TERRITORIO}** (detalle en 🔧 Correcciones).")
+    alertas.append(("Hay sitios sin territorio en baseline" if modo_arch
+                    else "Hay sitios del proyecto sin región en la pestaña Sitios")
+                   + f"; se muestran en la columna **{SIN_TERRITORIO}** "
+                   "(detalle en la última pestaña).")
+if modo_arch and calidad is not None:
+    if len(calidad["sin_trabajos"]):
+        alertas.append(f"**{len(calidad['sin_trabajos'])}** sitio(s) de la lista no tienen "
+                       "trabajos de los MasterPlan elegidos en RF: cuentan en el total, pero "
+                       "en ningún hito.")
+    if calidad["faltantes"]:
+        alertas.append("En RF no encontré: " + ", ".join(calidad["faltantes"]) + ".")
 if (fuente == FUENTE_EXCEL and info["ref_encabezado"] and h_total
         and int(info["ref_encabezado"]) != int(df.loc[h_total, "Total"])):
     alertas.append(f"El encabezado indica **{int(info['ref_encabezado'])}** sitios, "
@@ -566,9 +905,10 @@ kpi(c[5], "Carga negados · Cosite", f"{v(h_neg)} · {v(h_cos)}", "requieren ges
 
 st.write("")
 
+_n5 = (int(len(calidad["sin_trabajos"]) + len(sin_terr)) if modo_arch else len(diferencias))
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["📊 Embudo", "🗺️ Por territorio", "⏳ Pendientes", "📋 Tabla",
-     f"🔧 Correcciones ({len(diferencias)})"])
+     (f"🔎 Calidad de datos ({_n5})" if modo_arch else f"🔧 Correcciones ({_n5})")])
 
 hitos_embudo = [buscar(df, h) for h in ORDEN_EMBUDO]
 hitos_embudo = [h for h in hitos_embudo if h is not None]
@@ -614,7 +954,7 @@ with tab1:
         fig.update_xaxes(visible=False, range=[0, max(valores + [1]) * 1.22])
         fig.update_layout(clickmode="event+select")
         pto = leer_click(grafico_clic(fig, "clk_avance"), "clk_avance")
-        if pto and pto.get("y") in list(df_excel.index):
+        if pto and pto.get("y") in list(df.index):
             ir_a_detalle("t1", pto["y"])
         st.caption("👆 Haz clic en una barra para ver sus sitios abajo.")
 
@@ -823,7 +1163,7 @@ with tab4:
     )
 
 # ---- Tab 5: Correcciones ---------------------------------------------------
-with tab5:
+def vista_correcciones_excel():
     st.subheader("Diferencias entre el Resumen del Excel y el recálculo")
     if df_recalc is None:
         st.info(error_recalc)
@@ -851,9 +1191,47 @@ with tab5:
                     "pestaña `moder` o en la columna B de `Sitios`:")
         st.dataframe(sin_terr, hide_index=True, use_container_width=True)
 
-    h_rfic = buscar(df_excel, "RFIC-OK")
+    h_rfic = buscar(df, "RFIC-OK")
     if h_rfic and df_recalc is not None and int(df_recalc.loc[h_rfic, "Total"]) == 0:
         st.info("**RFIC-OK sigue en 0 aunque ya está bien calculado:** en Sitios un sitio "
                 "solo cuenta si **todos** sus trabajos tienen fecha de RFIC, y casi ningún "
                 "trabajo la tiene en la pestaña RF. Es un tema de los datos de origen, "
                 "no de la fórmula.")
+
+
+def vista_calidad():
+    st.subheader("Calidad de los datos cargados")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Sitios en la lista", f"{calidad['n_sitios']:,}")
+    c2.metric("Trabajos de RF considerados", f"{calidad['n_trabajos']:,}")
+    c3.metric("Sitios sin trabajos en RF", f"{len(calidad['sin_trabajos']):,}")
+    st.caption("MasterPlan incluidos: " + ", ".join(calidad["planes"]) + ". "
+               "Un sitio cumple un hito cuando **todos** sus trabajos de esos MasterPlan tienen "
+               "fecha en la columna correspondiente de RF.")
+
+    if len(sin_terr):
+        st.markdown(f"**Sitios sin territorio ({len(sin_terr)})** — revisa el nombre en "
+                    "baseline o la columna *Territorio Comercial*:")
+        st.dataframe(sin_terr, hide_index=True, use_container_width=True)
+    if len(calidad["sin_trabajos"]):
+        st.markdown(f"**Sitios sin trabajos en RF ({len(calidad['sin_trabajos'])})** — no "
+                    "aparecen en RF con los MasterPlan elegidos (pueden estar bajo otro plan "
+                    "o faltar en el export):")
+        st.dataframe(calidad["sin_trabajos"], hide_index=True, use_container_width=True)
+    if calidad["faltantes"]:
+        st.warning("Columnas que no encontré en RF: " + ", ".join(calidad["faltantes"]))
+    if not len(sin_terr) and not len(calidad["sin_trabajos"]) and not calidad["faltantes"]:
+        st.success("Todos los sitios tienen territorio y trabajos en RF.")
+
+    h_rfic = buscar(df, "RFIC-OK")
+    if h_rfic and int(df.loc[h_rfic, "Total"]) == 0:
+        st.info("**RFIC-OK está en 0:** casi ningún trabajo tiene fecha de RFIC en RF, y un "
+                "sitio solo cuenta cuando todos sus trabajos la tienen. Es un tema de los "
+                "datos de origen.")
+
+
+with tab5:
+    if modo_arch:
+        vista_calidad()
+    else:
+        vista_correcciones_excel()
