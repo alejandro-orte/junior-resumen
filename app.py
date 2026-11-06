@@ -67,6 +67,23 @@ st.markdown(
       .kpi.alerta {border-left: 4px solid #e34948;}
       .kpi.ok {border-left: 4px solid #1baf7a;}
       .kpi.info {border-left: 4px solid #2a78d6;}
+      .panel-t {font-size: 1.05rem; font-weight: 600; margin: 0 0 .15rem 0;}
+      .panel-s {font-size: .82rem; opacity: .65; margin: 0 0 .6rem 0;}
+      .hero {font-size: 3rem; font-weight: 700; line-height: 1; color: #1baf7a;}
+      .hero-sub {font-size: .9rem; opacity: .75; margin-top: 6px;}
+      .pbar {position: relative; height: 12px; border-radius: 6px;
+             background: rgba(128,128,128,.18); margin: 14px 0 6px 0; overflow: hidden;}
+      .pbar > div {position: absolute; top: 0; left: 0; height: 100%; border-radius: 6px;}
+      .pleg {display: flex; gap: 16px; font-size: .78rem; opacity: .8; flex-wrap: wrap;}
+      .dot {display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+            margin-right: 5px; vertical-align: middle;}
+      .bn-row {margin: 0 0 12px 0;}
+      .bn-top {display: flex; justify-content: space-between; font-size: .86rem;}
+      .bn-top b {font-variant-numeric: tabular-nums;}
+      .bn-bar {height: 6px; border-radius: 3px; background: #eb6834; margin-top: 4px;}
+      .chips {display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 4px;}
+      .chip {font-size: .84rem;}
+      .chip b {font-variant-numeric: tabular-nums;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -398,50 +415,120 @@ hitos_embudo = [h for h in hitos_embudo if h is not None]
 hitos_embudo += [h for h in df.index if h not in hitos_embudo and h not in [h_neg, h_cos]]
 
 # ---- Tab 1: Embudo ---------------------------------------------------------
+VERDE = "#1baf7a"
+
+
+def titulo(t, sub=""):
+    st.markdown(f'<p class="panel-t">{t}</p>' + (f'<p class="panel-s">{sub}</p>' if sub else ""),
+                unsafe_allow_html=True)
+
+
+def html(x):
+    """Inserta HTML sin sangrías (Markdown interpreta 4 espacios como bloque de código)."""
+    st.markdown(" ".join(l.strip() for l in x.splitlines()), unsafe_allow_html=True)
+
+
 with tab1:
-    col_a, col_b = st.columns([3, 2])
-    with col_a:
-        st.subheader("Avance por hito")
+    col_a, col_b = st.columns([3, 2], gap="large")
+
+    # -- Avance por hito -----------------------------------------------------
+    with col_a, st.container(border=True):
+        titulo("Avance por hito", f"Sitios que ya cumplen cada hito, sobre {total:,} sitios")
         valores = [int(dfv.loc[h, "Total"]) for h in hitos_embudo]
+        colores = [GRIS if val == 0 else (VERDE if h == h_insrv else AZUL)
+                   for h, val in zip(hitos_embudo, valores)]
         fig = go.Figure(go.Bar(
             x=valores, y=hitos_embudo, orientation="h",
-            marker=dict(color=[GRIS if val == 0 else AZUL for val in valores],
-                        cornerradius=4),
-            text=[f"{val:,}  ·  {pct(val, total):.0f}%" for val in valores],
+            marker=dict(color=colores, cornerradius=4),
+            text=[f"<b>{val:,}</b>   {pct(val, total):.0f}%" for val in valores],
             textposition="outside", cliponaxis=False,
-            hovertemplate="<b>%{y}</b><br>Sitios: %{x:,}<br>%{customdata:.1f}% del total<extra></extra>",
+            textfont=dict(size=13),
             customdata=[pct(val, total) for val in valores],
+            hovertemplate="<b>%{y}</b><br>%{x:,} sitios · %{customdata:.1f}% del total<extra></extra>",
         ))
-        layout_base(fig, 420)
-        fig.update_yaxes(autorange="reversed", showgrid=False)
-        fig.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,.18)",
-                         range=[0, max(valores + [1]) * 1.25])
-        st.plotly_chart(fig, use_container_width=True)
+        layout_base(fig, 44 * len(hitos_embudo) + 40)
+        fig.update_layout(bargap=0.38, margin=dict(l=10, r=10, t=10, b=10))
+        fig.update_yaxes(autorange="reversed", showgrid=False, ticklabelstandoff=10,
+                         tickfont=dict(size=13))
+        fig.update_xaxes(visible=False, range=[0, max(valores + [1]) * 1.22])
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
     with col_b:
-        st.subheader("% en servicio")
-        p = pct(v(h_insrv), total)
-        g = go.Figure(go.Indicator(
-            mode="gauge+number", value=p,
-            number=dict(suffix="%", valueformat=".1f"),
-            gauge=dict(axis=dict(range=[0, 100]), bar=dict(color="#1baf7a", thickness=.35),
-                       bgcolor="rgba(128,128,128,.12)", borderwidth=0),
-        ))
-        layout_base(g, 230)
-        st.plotly_chart(g, use_container_width=True)
+        # -- En servicio -----------------------------------------------------
+        with st.container(border=True):
+            titulo("En servicio")
+            p_ins, p_srv = pct(v(h_inst), total), pct(v(h_insrv), total)
+            html(
+                f"""<div class="hero">{p_srv:.1f}%</div>
+                <div class="hero-sub"><b>{v(h_insrv):,}</b> de {total:,} sitios en servicio ·
+                faltan <b>{total - v(h_insrv):,}</b></div>
+                <div class="pbar">
+                  <div style="width:{p_ins:.1f}%; background:#86b6ef;"></div>
+                  <div style="width:{p_srv:.1f}%; background:{VERDE};"></div>
+                </div>
+                <div class="pleg">
+                  <span><span class="dot" style="background:{VERDE}"></span>En servicio {p_srv:.0f}%</span>
+                  <span><span class="dot" style="background:#86b6ef"></span>Instalados {p_ins:.0f}%</span>
+                </div>"""
+            )
 
-        # Conversión entre hitos consecutivos (dónde se pierde más)
-        st.markdown("**Mayores caídas entre hitos consecutivos**")
-        caidas = []
-        for a, b in zip(hitos_embudo[:-1], hitos_embudo[1:]):
-            va, vb = int(dfv.loc[a, "Total"]), int(dfv.loc[b, "Total"])
-            if va > 0 and vb > 0:
-                caidas.append({"De": a, "A": b, "Sitios": va - vb})
-        caidas = sorted([x for x in caidas if x["Sitios"] > 0], key=lambda x: -x["Sitios"])[:4]
-        if caidas:
-            st.dataframe(pd.DataFrame(caidas), hide_index=True, use_container_width=True)
-        else:
-            st.caption("Sin caídas entre hitos.")
+        # -- Cuellos de botella ---------------------------------------------
+        with st.container(border=True):
+            titulo("Dónde se quedan los sitios", "Sitios que pasan un hito pero no el siguiente")
+            caidas = []
+            for x, y in zip(hitos_embudo[:-1], hitos_embudo[1:]):
+                vx, vy = int(dfv.loc[x, "Total"]), int(dfv.loc[y, "Total"])
+                if vx > 0 and vy > 0 and vx > vy:
+                    caidas.append((x, y, vx - vy))
+            caidas = sorted(caidas, key=lambda c: -c[2])[:4]
+            if caidas:
+                mx = caidas[0][2]
+                filas_html = "".join(
+                    f"""<div class="bn-row"><div class="bn-top">
+                          <span>{x} → {y}</span><b>{n:,} sitios</b></div>
+                          <div class="bn-bar" style="width:{n / mx * 100:.0f}%"></div></div>"""
+                    for x, y, n in caidas)
+                html(filas_html)
+            else:
+                st.caption("Sin caídas entre hitos.")
+
+    # -- Etapa actual de cada sitio ---------------------------------------------
+    cadena = [("Sin TSS cargado", h_total, buscar(df, "TSS Cargados"), "#c3c2b7"),
+              ("TSS por aprobar", buscar(df, "TSS Cargados"), h_tss, "#86b6ef"),
+              ("Aprobado, sin instalar", h_tss, h_inst, "#5598e7"),
+              ("Instalado, sin integrar", h_inst, buscar(df, "Integrados"), "#256abf"),
+              ("Integrado, sin InSrv", buscar(df, "Integrados"), h_insrv, "#104281"),
+              ("En servicio", h_insrv, None, VERDE)]
+    if all(c[1] for c in cadena):
+        etapas = []
+        for nombre, desde, hasta, color in cadena:
+            n = v(desde) - (v(hasta) if hasta else 0)
+            etapas.append((nombre, max(n, 0), color))
+        with st.container(border=True):
+            titulo("¿En qué etapa está cada sitio hoy?",
+                   "Cada sitio se cuenta una sola vez, en el último hito que cumple")
+            fig_e = go.Figure()
+            for nombre, n, color in etapas:
+                if n == 0:
+                    continue
+                fig_e.add_bar(
+                    x=[n], y=[""], orientation="h", name=nombre,
+                    marker=dict(color=color, line=dict(width=0)),
+                    text=[f"{n}" if pct(n, total) >= 4 else ""], textposition="inside",
+                    insidetextanchor="middle", textfont=dict(size=13),
+                    hovertemplate=f"<b>{nombre}</b><br>{n:,} sitios · {pct(n, total):.1f}%<extra></extra>",
+                )
+            fig_e.update_layout(barmode="stack", showlegend=False, height=70,
+                                margin=dict(l=0, r=0, t=0, b=0),
+                                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            fig_e.update_xaxes(visible=False, range=[0, max(total, 1)])
+            fig_e.update_yaxes(visible=False)
+            st.plotly_chart(fig_e, use_container_width=True, config={"displayModeBar": False})
+            chips = "".join(
+                f'<span class="chip"><span class="dot" style="background:{c}"></span>'
+                f'{nm} <b>{n:,}</b> <span style="opacity:.6">({pct(n, total):.0f}%)</span></span>'
+                for nm, n, c in etapas)
+            st.markdown(f'<div class="chips">{chips}</div>', unsafe_allow_html=True)
 
 # ---- Tab 2: Por territorio -------------------------------------------------
 with tab2:
