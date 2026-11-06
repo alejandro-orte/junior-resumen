@@ -288,7 +288,17 @@ def construir_detalle(raw_sitios: pd.DataFrame, territorios: list, proyecto: str
 
 @st.cache_data(show_spinner="Leyendo archivo…")
 def cargar(contenido: bytes):
-    xls = pd.ExcelFile(io.BytesIO(contenido), engine="openpyxl")
+    tipo = tipo_contenido(contenido)
+    if tipo == "cifrado":
+        raise ValueError(MENSAJE_CIFRADO)
+    if tipo in ("csv", "html"):
+        raise ValueError("Este archivo no es un libro de Excel. Para exports de texto o HTML "
+                         "usa el modo **Lista de sitios + RF + baseline**.")
+    try:
+        xls = pd.ExcelFile(io.BytesIO(contenido))  # openpyxl (.xlsx) o xlrd (.xls antiguo)
+    except ImportError as e:
+        raise ValueError("Este es un Excel antiguo (.xls) y falta la librería 'xlrd' "
+                         "(agrégala a requirements.txt) o guárdalo como .xlsx.") from e
     buscar_hoja = lambda n: next((h for h in xls.sheet_names  # noqa: E731
                                   if h.strip().lower() == n.lower()), None)
     hoja = buscar_hoja(HOJA)
@@ -445,12 +455,25 @@ def _convertir_fechas_texto(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+MENSAJE_CIFRADO = (
+    "Este archivo está **protegido** (cifrado con contraseña o con una etiqueta de "
+    "confidencialidad / gestión de derechos) y solo Excel con tu cuenta puede abrirlo; "
+    "la app no puede leerlo así. Para usarlo: en Excel ve a *Archivo → Información → "
+    "Proteger libro* (o a *Confidencialidad* en la cinta) y quita la protección, o copia las "
+    "hojas que necesitas a un libro nuevo y guárdalo. También puedes usar el modo "
+    "**Lista de sitios + RF + baseline**, que no necesita este archivo.")
+
+
 def tipo_contenido(contenido: bytes) -> str:
     """Detecta el formato por el contenido (no por la extensión): muchos '.xls' de los
     sistemas internos son en realidad tablas HTML."""
     if contenido[:4] == b"PK\x03\x04":
         return "xlsx"
     if contenido[:4] == b"\xd0\xcf\x11\xe0":
+        # Contenedor OLE: puede ser un .xls real o un libro cifrado (contraseña / IRM)
+        if (b"E\x00n\x00c\x00r\x00y\x00p\x00t\x00e\x00d\x00P\x00a\x00c\x00k\x00a\x00g\x00e\x00" in contenido
+                or b"D\x00R\x00M\x00E\x00n\x00c\x00r\x00y\x00p\x00t\x00e\x00d\x00" in contenido):
+            return "cifrado"
         return "xls"
     muestra = decodificar(contenido[:200000]).lower()
     return "html" if ("<table" in muestra or "<html" in muestra) else "csv"
@@ -469,6 +492,8 @@ def leer_tabla(contenido: bytes, nombre: str, hojas_pref: tuple, requeridas: tup
         return None
 
     tipo = tipo_contenido(contenido)
+    if tipo == "cifrado":
+        raise ValueError(MENSAJE_CIFRADO)
     if tipo in ("csv", "html"):
         if tipo == "csv":
             crudos = [pd.read_csv(io.StringIO(decodificar(contenido)), sep=None,
