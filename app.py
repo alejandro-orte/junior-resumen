@@ -7,6 +7,7 @@ Ejecutar:
     streamlit run app.py
 """
 
+import datetime
 import io
 
 import pandas as pd
@@ -126,15 +127,103 @@ def parsear_resumen(raw: pd.DataFrame):
     return df, territorios, total_col, info
 
 
+# ---------------------------------------------------------------------------
+# Recálculo desde la pestaña Sitios (mismas reglas que las fórmulas del
+# Resumen, sin los errores de celda: #REF!, territorio equivocado, etc.)
+# ---------------------------------------------------------------------------
+HOJA_SITIOS = "Sitios"
+SIN_TERRITORIO = "Sin territorio"
+
+# Columna de Sitios que usa cada hito en el Resumen original (A=0, B=1, ...)
+COL_SITIOS = {"region": 1, "proyecto": 4, "carga": 9}
+HITO_COL = {
+    "TOTAL SITIOS": None,
+    "TSS CARGADOS": 5,    # F  FECHA TSS
+    "TSS APROBADOS": 10,  # K  TSS OK
+    "OBRA CIVIL OK": 12,  # M  OC
+    "DISEÑO TX": 14,      # O  DISEÑO TX
+    "RFIC-OK": 13,        # N  RFI-C
+    "INSTALADOS": 15,     # P  Fecha Instalación
+    "INTEGRADOS": 16,     # Q  Fecha Integración
+    "INSRV": 17,          # R  Fecha Inservice
+}
+HITO_TEXTO = {"CARGA NEGADOS": "NEGADO", "COSITE": "COSITE"}  # columna J
+
+
+def es_positivo(v) -> bool:
+    """Equivale al criterio ">0" de CONTAR.SI.CONJUNTO en Excel."""
+    if v is None or (isinstance(v, float) and pd.isna(v)) or v is pd.NaT:
+        return False
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, (pd.Timestamp, datetime.datetime, datetime.date)):
+        return True
+    if isinstance(v, datetime.time):
+        return v != datetime.time(0, 0)
+    if isinstance(v, (int, float)):
+        return v > 0
+    return False  # texto, errores (#N/A), etc.
+
+
+def recalcular_desde_sitios(raw_sitios: pd.DataFrame, df_excel: pd.DataFrame,
+                            territorios: list, proyecto: str) -> pd.DataFrame:
+    s = raw_sitios.iloc[1:]  # fila 0 = encabezados
+    s = s[s[COL_SITIOS["proyecto"]].astype(str).str.strip().str.upper() == _norm(proyecto)]
+
+    mapa = {_norm(t): t for t in territorios}
+    terr = s[COL_SITIOS["region"]].map(
+        lambda x: mapa.get(_norm(x), SIN_TERRITORIO) if pd.notna(x) else SIN_TERRITORIO)
+
+    columnas = list(territorios)
+    if (terr == SIN_TERRITORIO).any():
+        columnas.append(SIN_TERRITORIO)
+
+    filas = {}
+    for hito in df_excel.index:
+        clave = _norm(hito)
+        if clave in HITO_COL:
+            col = HITO_COL[clave]
+            mask = (pd.Series(True, index=s.index) if col is None
+                    else s[col].map(es_positivo))
+        elif clave in HITO_TEXTO:
+            mask = s[COL_SITIOS["carga"]].astype(str).str.strip().str.upper() == HITO_TEXTO[clave]
+        else:
+            filas[hito] = {c: int(df_excel.loc[hito, c]) if c in df_excel.columns else 0
+                           for c in columnas}  # hito desconocido: se deja el del Excel
+            continue
+        filas[hito] = {c: int((mask & (terr == c)).sum()) for c in columnas}
+
+    df = pd.DataFrame.from_dict(filas, orient="index")[columnas]
+    df["Total"] = df[columnas].sum(axis=1)
+    df.index.name = "Hito"
+    sin_terr = s.loc[terr == SIN_TERRITORIO, [0, COL_SITIOS["region"]]].copy()
+    sin_terr.columns = ["Sitio", "Región en Sitios"]
+    return df, sin_terr.reset_index(drop=True)
+
+
 @st.cache_data(show_spinner="Leyendo archivo…")
 def cargar(contenido: bytes):
     xls = pd.ExcelFile(io.BytesIO(contenido), engine="openpyxl")
-    hoja = next((h for h in xls.sheet_names if h.strip().lower() == HOJA.lower()), None)
+    buscar_hoja = lambda n: next((h for h in xls.sheet_names  # noqa: E731
+                                  if h.strip().lower() == n.lower()), None)
+    hoja = buscar_hoja(HOJA)
     if hoja is None:
         raise ValueError(f"El archivo no tiene una pestaña llamada '{HOJA}'. "
                          f"Pestañas encontradas: {', '.join(xls.sheet_names)}")
     raw = pd.read_excel(xls, sheet_name=hoja, header=None)
-    return parsear_resumen(raw)
+    df_excel, territorios, total_col, info = parsear_resumen(raw)
+
+    df_recalc, sin_terr, error_recalc = None, None, None
+    hoja_s = buscar_hoja(HOJA_SITIOS)
+    if hoja_s is None:
+        error_recalc = f"No existe la pestaña '{HOJA_SITIOS}'; solo se muestra el Resumen del Excel."
+    else:
+        try:
+            raw_s = pd.read_excel(xls, sheet_name=hoja_s, header=None)
+            df_recalc, sin_terr = recalcular_desde_sitios(raw_s, df_excel, territorios, total_col)
+        except Exception as e:  # noqa: BLE001
+            error_recalc = f"No se pudo recalcular desde '{HOJA_SITIOS}': {e}"
+    return df_excel, df_recalc, sin_terr, territorios, total_col, info, error_recalc
 
 
 def buscar(df: pd.DataFrame, nombre: str):
@@ -191,23 +280,62 @@ if archivo is None:
     st.stop()
 
 try:
-    df, territorios, total_col, info = cargar(archivo.getvalue())
+    df_excel, df_recalc, sin_terr, terr_excel, total_col, info, error_recalc = cargar(archivo.getvalue())
 except Exception as e:  # noqa: BLE001
     st.error(f"No se pudo leer el archivo: {e}")
     st.stop()
 
-st.caption(f"Región **{info['region']}** · Proyecto **{total_col}** · Archivo: `{archivo.name}`")
+FUENTE_RECALC = "Recalculado (corregido)"
+FUENTE_EXCEL = "Resumen del Excel"
+
+with st.sidebar:
+    st.header("🧮 Fuente de datos")
+    if df_recalc is not None:
+        fuente = st.radio("Mostrar", [FUENTE_RECALC, FUENTE_EXCEL], index=0,
+                          help="Recalculado: cuenta los sitios directamente en la pestaña "
+                               "Sitios con las mismas reglas del Resumen, sin los errores "
+                               "de fórmula. Resumen del Excel: los valores tal cual.")
+    else:
+        fuente = FUENTE_EXCEL
+        st.warning(error_recalc)
+
+if fuente == FUENTE_RECALC:
+    df = df_recalc
+    territorios = [c for c in df.columns if c != "Total"]
+else:
+    df = df_excel
+    territorios = terr_excel
+
+# ---- Comparación Excel vs recalculado ---------------------------------------
+diferencias = []
+if df_recalc is not None:
+    for h in df_excel.index:
+        for t in terr_excel:
+            a, b = int(df_excel.loc[h, t]), int(df_recalc.loc[h, t])
+            if a != b:
+                diferencias.append({"Hito": h, "Columna": t, "Excel": a, "Recalculado": b})
+        if SIN_TERRITORIO in df_recalc.columns and df_recalc.loc[h, SIN_TERRITORIO]:
+            diferencias.append({"Hito": h, "Columna": SIN_TERRITORIO, "Excel": 0,
+                                "Recalculado": int(df_recalc.loc[h, SIN_TERRITORIO])})
+        a, b = int(df_excel.loc[h, "Total archivo"]), int(df_recalc.loc[h, "Total"])
+        if a != b:
+            diferencias.append({"Hito": h, "Columna": "Total", "Excel": a, "Recalculado": b})
+
+st.caption(f"Región **{info['region']}** · Proyecto **{total_col}** · "
+           f"Fuente: **{fuente}** · Archivo: `{archivo.name}`")
 
 # Filtro de territorios
 with st.sidebar:
     st.header("🔎 Filtros")
-    sel_terr = st.multiselect("Territorios", territorios, default=territorios)
+    sel_terr = st.multiselect("Territorios", territorios, default=territorios,
+                              key=f"terr_{fuente}")
 if not sel_terr:
     st.warning("Selecciona al menos un territorio.")
     st.stop()
 
 color_terr = {t: COLORES_TERRITORIO[i % len(COLORES_TERRITORIO)]
-              for i, t in enumerate(territorios)}  # color fijo por territorio
+              for i, t in enumerate(terr_excel)}  # color fijo por territorio
+color_terr[SIN_TERRITORIO] = GRIS
 dfv = df[sel_terr].copy()
 dfv["Total"] = dfv.sum(axis=1)
 
@@ -223,12 +351,19 @@ v = lambda h: int(dfv.loc[h, "Total"]) if h else 0  # noqa: E731
 
 # ---- Alertas de calidad de datos ----------------------------------------
 alertas = []
-if set(sel_terr) == set(territorios):
+if fuente == FUENTE_EXCEL and set(sel_terr) == set(territorios):
     dif = df[df["Total archivo"] != df["Total"]]
     for h, r in dif.iterrows():
         alertas.append(f"**{h}**: el total del archivo ({r['Total archivo']}) no coincide "
                        f"con la suma de territorios ({r['Total']}).")
-if info["ref_encabezado"] and h_total and int(info["ref_encabezado"]) != int(df.loc[h_total, "Total"]):
+if fuente == FUENTE_EXCEL and diferencias:
+    alertas.append(f"Hay **{len(diferencias)}** celda(s) del Resumen del Excel con errores de "
+                   f"fórmula. Cambia a *{FUENTE_RECALC}* o mira la pestaña 🔧 Correcciones.")
+if fuente == FUENTE_RECALC and SIN_TERRITORIO in df.columns:
+    alertas.append(f"Hay sitios del proyecto sin región en la pestaña Sitios; se muestran en "
+                   f"la columna **{SIN_TERRITORIO}** (detalle en 🔧 Correcciones).")
+if (fuente == FUENTE_EXCEL and info["ref_encabezado"] and h_total
+        and int(info["ref_encabezado"]) != int(df.loc[h_total, "Total"])):
     alertas.append(f"El encabezado indica **{int(info['ref_encabezado'])}** sitios, "
                    f"pero el total de sitios es **{int(df.loc[h_total, 'Total'])}**.")
 ceros = [h for h in df.index if h != h_total and h not in [h_neg, h_cos]
@@ -253,7 +388,9 @@ kpi(c[5], "Carga negados · Cosite", f"{v(h_neg)} · {v(h_cos)}", "requieren ges
 
 st.write("")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Embudo", "🗺️ Por territorio", "⏳ Pendientes", "📋 Tabla"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["📊 Embudo", "🗺️ Por territorio", "⏳ Pendientes", "📋 Tabla",
+     f"🔧 Correcciones ({len(diferencias)})"])
 
 hitos_embudo = [buscar(df, h) for h in ORDEN_EMBUDO]
 hitos_embudo = [h for h in hitos_embudo if h is not None]
@@ -368,17 +505,75 @@ with tab3:
 
 # ---- Tab 4: Tabla ----------------------------------------------------------
 with tab4:
-    st.subheader("Hoja Resumen")
+    st.subheader(f"Hoja Resumen · {fuente}")
     mostrar = dfv.copy()
     if h_total:
         mostrar["% del total"] = (mostrar["Total"] / max(total, 1) * 100).round(1)
+
+    # Celdas que difieren del Excel (solo tiene sentido en la vista recalculada)
+    celdas_dif = set()
+    if fuente == FUENTE_RECALC:
+        todos = set(sel_terr) == set(territorios)
+        for d in diferencias:
+            if d["Columna"] in sel_terr or (d["Columna"] == "Total" and todos):
+                celdas_dif.add((d["Hito"], d["Columna"]))
+
+    def resaltar(data):
+        estilos = pd.DataFrame("", index=data.index, columns=data.columns)
+        for h, c in celdas_dif:
+            if h in estilos.index and c in estilos.columns:
+                estilos.loc[h, c] = ("background-color: #eda100; color: #1a1a19; "
+                                     "font-weight: 700;")
+        return estilos
+
     st.dataframe(
         mostrar.style
         .background_gradient(cmap="Blues", subset=sel_terr + ["Total"], axis=None)
+        .apply(resaltar, axis=None)
         .format({"% del total": "{:.1f}%"} if h_total else {}),
         use_container_width=True, height=470,
     )
+    if celdas_dif:
+        st.caption(f"🟨 {len(celdas_dif)} celda(s) resaltada(s): el valor corregido es distinto "
+                   f"al de la pestaña Resumen del Excel. Detalle en 🔧 Correcciones.")
     st.download_button(
         "⬇️ Descargar CSV", mostrar.to_csv().encode("utf-8-sig"),
-        file_name="resumen.csv", mime="text/csv",
+        file_name=f"resumen_{'recalculado' if fuente == FUENTE_RECALC else 'excel'}.csv",
+        mime="text/csv",
     )
+
+# ---- Tab 5: Correcciones ---------------------------------------------------
+with tab5:
+    st.subheader("Diferencias entre el Resumen del Excel y el recálculo")
+    if df_recalc is None:
+        st.info(error_recalc)
+    elif not diferencias:
+        st.success("El Resumen del Excel coincide con el recálculo desde la pestaña Sitios.")
+    else:
+        st.caption("El recálculo cuenta los sitios de la pestaña **Sitios** del proyecto "
+                   f"**{total_col}** que tienen fecha en cada hito, igual que las fórmulas "
+                   "del Resumen, pero sin sus errores de referencia. El Excel no se modifica.")
+
+        def motivo(d):
+            if d["Columna"] == SIN_TERRITORIO:
+                return "Sitio sin región en Sitios: el Excel no lo cuenta en ningún territorio"
+            if d["Columna"] == "Total":
+                return "El total del Excel no coincide con la suma de territorios"
+            return "Fórmula del Resumen con referencia errada (#REF!, otro territorio u otra columna)"
+
+        tabla = pd.DataFrame(diferencias)
+        tabla["Diferencia"] = tabla["Recalculado"] - tabla["Excel"]
+        tabla["Motivo"] = tabla.apply(motivo, axis=1)
+        st.dataframe(tabla, hide_index=True, use_container_width=True)
+
+    if sin_terr is not None and len(sin_terr):
+        st.markdown(f"**Sitios del proyecto sin región ({len(sin_terr)})** — corregir en la "
+                    "pestaña `moder` o en la columna B de `Sitios`:")
+        st.dataframe(sin_terr, hide_index=True, use_container_width=True)
+
+    h_rfic = buscar(df_excel, "RFIC-OK")
+    if h_rfic and df_recalc is not None and int(df_recalc.loc[h_rfic, "Total"]) == 0:
+        st.info("**RFIC-OK sigue en 0 aunque ya está bien calculado:** en Sitios un sitio "
+                "solo cuenta si **todos** sus trabajos tienen fecha de RFIC, y casi ningún "
+                "trabajo la tiene en la pestaña RF. Es un tema de los datos de origen, "
+                "no de la fórmula.")
