@@ -218,6 +218,67 @@ def recalcular_desde_sitios(raw_sitios: pd.DataFrame, df_excel: pd.DataFrame,
     return df, sin_terr.reset_index(drop=True)
 
 
+# Columnas de fecha que se muestran en el detalle (nombre visible -> columna de Sitios)
+COLS_DETALLE = {
+    "Fecha TSS": 5, "TSS OK": 10, "Obra civil OK": 12, "Diseño TX": 14, "RFIC": 13,
+    "Instalación": 15, "Integración": 16, "InSrv": 17,
+}
+# Qué columna de fecha corresponde a cada hito del Resumen
+HITO_FECHA = {"TSS CARGADOS": "Fecha TSS", "TSS APROBADOS": "TSS OK",
+              "OBRA CIVIL OK": "Obra civil OK", "DISEÑO TX": "Diseño TX", "RFIC-OK": "RFIC",
+              "INSTALADOS": "Instalación", "INTEGRADOS": "Integración", "INSRV": "InSrv"}
+ETAPAS = [  # (nombre, color) de la etapa más temprana a la más avanzada
+    ("Sin TSS cargado", "#c3c2b7"), ("TSS por aprobar", "#86b6ef"),
+    ("Aprobado, sin instalar", "#5598e7"), ("Instalado, sin integrar", "#256abf"),
+    ("Integrado, sin InSrv", "#104281"), ("En servicio", "#1baf7a"),
+]
+PREFIJO_ETAPA = "Etapa · "
+
+
+def a_fecha(v):
+    if isinstance(v, (pd.Timestamp, datetime.datetime, datetime.date)):
+        return pd.Timestamp(v)
+    return pd.NaT
+
+
+def construir_detalle(raw_sitios: pd.DataFrame, territorios: list, proyecto: str) -> pd.DataFrame:
+    """Una fila por sitio del proyecto, con su territorio, fechas y si cumple cada hito."""
+    s = raw_sitios.iloc[1:]
+    s = s[s[COL_SITIOS["proyecto"]].astype(str).str.strip().str.upper() == _norm(proyecto)]
+    mapa = {_norm(t): t for t in territorios}
+    det = pd.DataFrame({
+        "Sitio": s[0].astype(str).str.strip(),
+        "Territorio": s[COL_SITIOS["region"]].map(
+            lambda x: mapa.get(_norm(x), SIN_TERRITORIO) if pd.notna(x) else SIN_TERRITORIO),
+    })
+    for nombre, col in COLS_DETALLE.items():
+        det[nombre] = s[col].map(a_fecha)
+    for clave, col in HITO_COL.items():
+        det["ok_" + clave] = True if col is None else s[col].map(es_positivo)
+    carga = s[COL_SITIOS["carga"]].astype(str).str.strip().str.upper()
+    for clave, txt in HITO_TEXTO.items():
+        det["ok_" + clave] = carga == txt
+    det["Carga"] = s[COL_SITIOS["carga"]].map(lambda x: x if isinstance(x, str) else "")
+    det["Autorización"] = s[3].map(lambda x: x if isinstance(x, str) else "")
+    det["Scope"] = s[21].map(lambda x: x if isinstance(x, str) else "") if 21 in s.columns else ""
+
+    def etapa(r):
+        if r["ok_INSRV"]:
+            return ETAPAS[5][0]
+        if r["ok_INTEGRADOS"]:
+            return ETAPAS[4][0]
+        if r["ok_INSTALADOS"]:
+            return ETAPAS[3][0]
+        if r["ok_TSS APROBADOS"]:
+            return ETAPAS[2][0]
+        if r["ok_TSS CARGADOS"]:
+            return ETAPAS[1][0]
+        return ETAPAS[0][0]
+
+    det["Etapa"] = det.apply(etapa, axis=1)
+    return det.reset_index(drop=True)
+
+
 @st.cache_data(show_spinner="Leyendo archivo…")
 def cargar(contenido: bytes):
     xls = pd.ExcelFile(io.BytesIO(contenido), engine="openpyxl")
@@ -230,7 +291,7 @@ def cargar(contenido: bytes):
     raw = pd.read_excel(xls, sheet_name=hoja, header=None)
     df_excel, territorios, total_col, info = parsear_resumen(raw)
 
-    df_recalc, sin_terr, error_recalc = None, None, None
+    df_recalc, sin_terr, det, error_recalc = None, None, None, None
     hoja_s = buscar_hoja(HOJA_SITIOS)
     if hoja_s is None:
         error_recalc = f"No existe la pestaña '{HOJA_SITIOS}'; solo se muestra el Resumen del Excel."
@@ -238,9 +299,10 @@ def cargar(contenido: bytes):
         try:
             raw_s = pd.read_excel(xls, sheet_name=hoja_s, header=None)
             df_recalc, sin_terr = recalcular_desde_sitios(raw_s, df_excel, territorios, total_col)
+            det = construir_detalle(raw_s, territorios, total_col)
         except Exception as e:  # noqa: BLE001
             error_recalc = f"No se pudo recalcular desde '{HOJA_SITIOS}': {e}"
-    return df_excel, df_recalc, sin_terr, territorios, total_col, info, error_recalc
+    return df_excel, df_recalc, sin_terr, det, territorios, total_col, info, error_recalc
 
 
 def buscar(df: pd.DataFrame, nombre: str):
@@ -282,6 +344,105 @@ def layout_base(fig, alto=380):
 
 
 # ---------------------------------------------------------------------------
+# Detalle de sitios al hacer clic
+# ---------------------------------------------------------------------------
+def leer_click(evento, key):
+    """Devuelve el punto clicado solo si la selección de ese gráfico cambió."""
+    try:
+        puntos = list(evento["selection"]["points"])
+    except (KeyError, TypeError, AttributeError):
+        try:
+            puntos = list(evento.selection.points)
+        except AttributeError:
+            puntos = []
+    firma = repr(puntos)
+    if st.session_state.get("_firma_" + key) == firma:
+        return None
+    st.session_state["_firma_" + key] = firma
+    return puntos[0] if puntos else None
+
+
+def ir_a_detalle(prefijo, ver, territorio="Todos", modo="Cumplen"):
+    st.session_state[f"{prefijo}_ver"] = ver
+    st.session_state[f"{prefijo}_terr"] = territorio
+    st.session_state[f"{prefijo}_modo"] = modo
+
+
+def grafico_clic(fig, key):
+    """Muestra un gráfico de Plotly que responde a clics (Streamlit >= 1.35)."""
+    return st.plotly_chart(fig, use_container_width=True, on_select="rerun",
+                           selection_mode="points", key=key,
+                           config={"displayModeBar": False})
+
+
+def panel_detalle(prefijo):
+    if det is None:
+        return
+    with st.container(border=True):
+        st.markdown('<p class="panel-t">🔍 Sitios detrás de cada número</p>'
+                    '<p class="panel-s">Haz clic en una barra de los gráficos de arriba, '
+                    'o elige aquí qué quieres ver.</p>', unsafe_allow_html=True)
+        opciones_ver = list(df_excel.index) + [PREFIJO_ETAPA + e for e, _ in ETAPAS]
+        terr_disp = [t for t in sel_terr]
+        opciones_terr = ["Todos"] + terr_disp
+        for k, ops in ((f"{prefijo}_ver", opciones_ver), (f"{prefijo}_terr", opciones_terr)):
+            if st.session_state.get(k) not in ops:
+                st.session_state[k] = ops[0]
+        if st.session_state.get(f"{prefijo}_modo") not in ("Cumplen", "Pendientes"):
+            st.session_state[f"{prefijo}_modo"] = "Cumplen"
+
+        c1, c2, c3 = st.columns([3, 2, 2])
+        ver = c1.selectbox("Ver", opciones_ver, key=f"{prefijo}_ver")
+        terr_sel = c2.selectbox("Territorio", opciones_terr, key=f"{prefijo}_terr")
+        es_etapa = ver.startswith(PREFIJO_ETAPA)
+        es_total = _norm(ver) == "TOTAL SITIOS"
+        modo = c3.radio("Mostrar", ["Cumplen", "Pendientes"], key=f"{prefijo}_modo",
+                        horizontal=True, disabled=es_etapa or es_total,
+                        help="Cumplen: sitios que ya tienen el hito. Pendientes: los que no.")
+
+        d = det[det["Territorio"].isin(sel_terr)]
+        if terr_sel != "Todos":
+            d = d[d["Territorio"] == terr_sel]
+        col_fecha = None
+        if es_etapa:
+            d = d[d["Etapa"] == ver[len(PREFIJO_ETAPA):]]
+            titulo_lista = ver
+        else:
+            clave = _norm(ver)
+            if "ok_" + clave in d.columns:
+                mask = d["ok_" + clave]
+                if not es_total:
+                    d = d[mask] if modo == "Cumplen" else d[~mask]
+            col_fecha = HITO_FECHA.get(clave)
+            titulo_lista = ver if es_total else f"{ver} · {modo.lower()}"
+
+        columnas = ["Sitio", "Territorio", "Etapa"]
+        if col_fecha:
+            columnas.append(col_fecha)
+        columnas += [c for c in COLS_DETALLE if c != col_fecha]
+        columnas += ["Carga", "Autorización", "Scope"]
+        d = d[columnas].sort_values(["Territorio", "Sitio"])
+
+        st.markdown(f"**{len(d):,} sitio(s)** · {titulo_lista}"
+                    + ("" if terr_sel == "Todos" else f" · {terr_sel}"))
+        if fuente == FUENTE_EXCEL:
+            st.caption("La lista sale de la pestaña Sitios con el cálculo corregido; puede "
+                       "diferir del Resumen del Excel en las celdas con error.")
+        if d.empty:
+            st.info("No hay sitios con esa condición.")
+            return
+        cfg = {c: st.column_config.DateColumn(c, format="DD/MM/YYYY") for c in COLS_DETALLE}
+        if col_fecha:
+            cfg[col_fecha] = st.column_config.DateColumn(f"⭐ {col_fecha}", format="DD/MM/YYYY")
+        st.dataframe(d, hide_index=True, use_container_width=True, column_config=cfg,
+                     height=min(38 + 35 * len(d), 460))
+        nombre = "".join(ch if ch.isalnum() else "_" for ch in titulo_lista + "_" + terr_sel)
+        st.download_button("⬇️ Descargar lista (CSV)", d.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"sitios_{nombre}.csv", mime="text/csv",
+                           key=f"{prefijo}_dl")
+
+
+# ---------------------------------------------------------------------------
 # Interfaz
 # ---------------------------------------------------------------------------
 with st.sidebar:
@@ -297,7 +458,7 @@ if archivo is None:
     st.stop()
 
 try:
-    df_excel, df_recalc, sin_terr, terr_excel, total_col, info, error_recalc = cargar(archivo.getvalue())
+    df_excel, df_recalc, sin_terr, det, terr_excel, total_col, info, error_recalc = cargar(archivo.getvalue())
 except Exception as e:  # noqa: BLE001
     st.error(f"No se pudo leer el archivo: {e}")
     st.stop()
@@ -451,7 +612,11 @@ with tab1:
         fig.update_yaxes(autorange="reversed", showgrid=False, ticklabelstandoff=10,
                          tickfont=dict(size=13))
         fig.update_xaxes(visible=False, range=[0, max(valores + [1]) * 1.22])
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        fig.update_layout(clickmode="event+select")
+        pto = leer_click(grafico_clic(fig, "clk_avance"), "clk_avance")
+        if pto and pto.get("y") in list(df_excel.index):
+            ir_a_detalle("t1", pto["y"])
+        st.caption("👆 Haz clic en una barra para ver sus sitios abajo.")
 
     with col_b:
         # -- En servicio -----------------------------------------------------
@@ -499,18 +664,26 @@ with tab1:
               ("Instalado, sin integrar", h_inst, buscar(df, "Integrados"), "#256abf"),
               ("Integrado, sin InSrv", buscar(df, "Integrados"), h_insrv, "#104281"),
               ("En servicio", h_insrv, None, VERDE)]
-    if all(c[1] for c in cadena):
+    if det is not None:
+        d_et = det[det["Territorio"].isin(sel_terr)]
+        etapas = [(nm, int((d_et["Etapa"] == nm).sum()), col) for nm, col in ETAPAS]
+    elif all(c[1] for c in cadena):
         etapas = []
         for nombre, desde, hasta, color in cadena:
             n = v(desde) - (v(hasta) if hasta else 0)
             etapas.append((nombre, max(n, 0), color))
+    else:
+        etapas = []
+    if etapas:
         with st.container(border=True):
             titulo("¿En qué etapa está cada sitio hoy?",
                    "Cada sitio se cuenta una sola vez, en el último hito que cumple")
             fig_e = go.Figure()
+            trazas_etapa = []
             for nombre, n, color in etapas:
                 if n == 0:
                     continue
+                trazas_etapa.append(nombre)
                 fig_e.add_bar(
                     x=[n], y=[""], orientation="h", name=nombre,
                     marker=dict(color=color, line=dict(width=0)),
@@ -523,12 +696,19 @@ with tab1:
                                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
             fig_e.update_xaxes(visible=False, range=[0, max(total, 1)])
             fig_e.update_yaxes(visible=False)
-            st.plotly_chart(fig_e, use_container_width=True, config={"displayModeBar": False})
+            fig_e.update_layout(clickmode="event+select")
+            pto = leer_click(grafico_clic(fig_e, "clk_etapa"), "clk_etapa")
+            if pto is not None and det is not None:
+                i = pto.get("curve_number")
+                if isinstance(i, int) and 0 <= i < len(trazas_etapa):
+                    ir_a_detalle("t1", PREFIJO_ETAPA + trazas_etapa[i])
             chips = "".join(
                 f'<span class="chip"><span class="dot" style="background:{c}"></span>'
                 f'{nm} <b>{n:,}</b> <span style="opacity:.6">({pct(n, total):.0f}%)</span></span>'
                 for nm, n, c in etapas)
             st.markdown(f'<div class="chips">{chips}</div>', unsafe_allow_html=True)
+
+    panel_detalle("t1")
 
 # ---- Tab 2: Por territorio -------------------------------------------------
 with tab2:
@@ -563,7 +743,12 @@ with tab2:
     ))
     layout_base(bar, 360)
     bar.update_yaxes(range=[0, max(vals.max(), 1) * 1.2])
-    st.plotly_chart(bar, use_container_width=True)
+    bar.update_layout(clickmode="event+select")
+    pto = leer_click(grafico_clic(bar, "clk_terr"), "clk_terr")
+    if pto and pto.get("x") in sel_terr:
+        ir_a_detalle("t2", hito_sel, pto["x"])
+    st.caption("👆 Haz clic en un territorio para ver sus sitios abajo.")
+    panel_detalle("t2")
 
 # ---- Tab 3: Pendientes -----------------------------------------------------
 with tab3:
@@ -586,9 +771,17 @@ with tab3:
     layout_base(fig_p, 440)
     fig_p.update_yaxes(autorange="reversed", showgrid=False)
     fig_p.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,.18)")
-    st.plotly_chart(fig_p, use_container_width=True)
+    fig_p.update_layout(clickmode="event+select")
+    pto = leer_click(grafico_clic(fig_p, "clk_pend"), "clk_pend")
+    if pto and pto.get("y") in hitos_pend:
+        i = pto.get("curve_number")
+        terr_clic = sel_terr[i] if isinstance(i, int) and 0 <= i < len(sel_terr) else "Todos"
+        ir_a_detalle("t3", pto["y"], terr_clic, "Pendientes")
+    st.caption("👆 Haz clic en un tramo de color para ver los sitios pendientes de ese "
+               "territorio y hito.")
 
     st.dataframe(pend, use_container_width=True)
+    panel_detalle("t3")
 
 # ---- Tab 4: Tabla ----------------------------------------------------------
 with tab4:
