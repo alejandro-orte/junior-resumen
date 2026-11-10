@@ -654,9 +654,15 @@ def leer_click(evento, key):
 
 
 def ir_a_detalle(prefijo, ver, territorio="Todos", modo="Cumplen"):
+    """Deja el panel de abajo apuntando a lo clicado y abre una ventana emergente con la lista."""
     st.session_state[f"{prefijo}_ver"] = ver
     st.session_state[f"{prefijo}_terr"] = territorio
     st.session_state[f"{prefijo}_modo"] = modo
+    try:
+        ventana_sitios(ver, territorio, modo)
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"No pude abrir la ventana emergente ({e}). La lista está en el panel "
+                   "🔍 de más abajo.")
 
 
 def grafico_clic(fig, key):
@@ -676,6 +682,7 @@ def leer_celda(evento, key):
         except AttributeError:
             celdas = []
     firma = repr(celdas)
+    st.session_state["_dbg_" + key] = celdas
     if st.session_state.get("_firma_" + key) == firma:
         return None
     st.session_state["_firma_" + key] = firma
@@ -689,9 +696,12 @@ def tabla_clicable(objeto, key, **kw):
     if kw_nuevo.pop("use_container_width", False):
         kw_nuevo["width"] = "stretch"
     try:
-        return st.dataframe(objeto, on_select="rerun", selection_mode="single-cell",
-                            key=key, **kw_nuevo)
-    except Exception:  # noqa: BLE001
+        ev = st.dataframe(objeto, on_select="rerun", selection_mode="single-cell",
+                          key=key, **kw_nuevo)
+        st.session_state.pop("_sin_clic_" + key, None)
+        return ev
+    except Exception as e:  # noqa: BLE001
+        st.session_state["_sin_clic_" + key] = str(e)
         st.dataframe(objeto, **kw)
         return None
 
@@ -716,16 +726,81 @@ def clic_en_tabla(evento, key, tabla, prefijo, modo):
     ir_a_detalle(prefijo, tabla.index[fila], terr, modo)
 
 
+def obtener_lista(ver, terr_sel, modo):
+    """Sitios que cumplen (o no) un hito en un territorio. Devuelve (tabla, título, col_fecha)."""
+    es_etapa = ver.startswith(PREFIJO_ETAPA)
+    es_total = _norm(ver) == "TOTAL SITIOS"
+    d = det[det["Territorio"].isin(sel_terr)]
+    if terr_sel != "Todos":
+        d = d[d["Territorio"] == terr_sel]
+    col_fecha = None
+    if es_etapa:
+        d = d[d["Etapa"] == ver[len(PREFIJO_ETAPA):]]
+        titulo_lista = ver
+    else:
+        clave = _norm(ver)
+        if "ok_" + clave in d.columns:
+            mask = d["ok_" + clave]
+            if not es_total:
+                d = d[mask] if modo == "Cumplen" else d[~mask]
+        col_fecha = HITO_FECHA.get(clave)
+        titulo_lista = ver if es_total else f"{ver} · {modo.lower()}"
+
+    columnas = ["Sitio", "Territorio", "Etapa"]
+    if "Trabajos" in d.columns:
+        columnas.append("Trabajos")
+    if col_fecha:
+        columnas.append(col_fecha)
+    columnas += [c for c in COLS_DETALLE if c != col_fecha]
+    columnas += [c for c in ("Carga", "Autorización", "Scope")
+                 if (d[c].astype(str).str.strip() != "").any()]
+    d = d[columnas].sort_values(["Territorio", "Sitio"])
+    return d, titulo_lista, col_fecha
+
+
+def config_columnas(col_fecha):
+    cfg = {c: st.column_config.DateColumn(c, format="DD/MM/YYYY") for c in COLS_DETALLE}
+    if col_fecha:
+        cfg[col_fecha] = st.column_config.DateColumn(f"⭐ {col_fecha}", format="DD/MM/YYYY")
+    return cfg
+
+
+def boton_csv(d, titulo_lista, terr_sel, key):
+    nombre = "".join(ch if ch.isalnum() else "_" for ch in titulo_lista + "_" + terr_sel)
+    args = ("⬇️ Descargar lista (CSV)", d.to_csv(index=False).encode("utf-8-sig"))
+    kw = dict(file_name=f"sitios_{nombre}.csv", mime="text/csv", key=key)
+    try:
+        st.download_button(*args, on_click="ignore", **kw)  # sin recargar la página
+    except TypeError:
+        st.download_button(*args, **kw)
+
+
+@st.dialog("Sitios", width="large")
+def ventana_sitios(ver, terr_sel, modo):
+    """Ventana emergente con los sitios detrás de la casilla o barra clicada."""
+    if det is None:
+        return
+    d, titulo_lista, col_fecha = obtener_lista(ver, terr_sel, modo)
+    st.markdown(f"**{len(d):,} sitio(s)** · {titulo_lista}"
+                + ("" if terr_sel == "Todos" else f" · {terr_sel}"))
+    if d.empty:
+        st.info("No hay sitios con esa condición.")
+        return
+    st.dataframe(d, hide_index=True, width="stretch", column_config=config_columnas(col_fecha),
+                 height=min(38 + 35 * len(d), 420))
+    boton_csv(d, titulo_lista, terr_sel, "dlg_dl")
+
+
 def panel_detalle(prefijo):
     if det is None:
         return
     with st.container(border=True):
         st.markdown('<p class="panel-t">🔍 Sitios detrás de cada número</p>'
-                    '<p class="panel-s">Haz clic en una barra de los gráficos de arriba, '
-                    'o elige aquí qué quieres ver.</p>', unsafe_allow_html=True)
+                    '<p class="panel-s">Al hacer clic en una barra o casilla se abre una ventana '
+                    'con la lista. Aquí abajo también puedes elegir qué ver.</p>',
+                    unsafe_allow_html=True)
         opciones_ver = list(df.index) + [PREFIJO_ETAPA + e for e, _ in ETAPAS]
-        terr_disp = [t for t in sel_terr]
-        opciones_terr = ["Todos"] + terr_disp
+        opciones_terr = ["Todos"] + [t for t in sel_terr]
         for k, ops in ((f"{prefijo}_ver", opciones_ver), (f"{prefijo}_terr", opciones_terr)):
             if st.session_state.get(k) not in ops:
                 st.session_state[k] = ops[0]
@@ -741,32 +816,7 @@ def panel_detalle(prefijo):
                         horizontal=True, disabled=es_etapa or es_total,
                         help="Cumplen: sitios que ya tienen el hito. Pendientes: los que no.")
 
-        d = det[det["Territorio"].isin(sel_terr)]
-        if terr_sel != "Todos":
-            d = d[d["Territorio"] == terr_sel]
-        col_fecha = None
-        if es_etapa:
-            d = d[d["Etapa"] == ver[len(PREFIJO_ETAPA):]]
-            titulo_lista = ver
-        else:
-            clave = _norm(ver)
-            if "ok_" + clave in d.columns:
-                mask = d["ok_" + clave]
-                if not es_total:
-                    d = d[mask] if modo == "Cumplen" else d[~mask]
-            col_fecha = HITO_FECHA.get(clave)
-            titulo_lista = ver if es_total else f"{ver} · {modo.lower()}"
-
-        columnas = ["Sitio", "Territorio", "Etapa"]
-        if "Trabajos" in d.columns:
-            columnas.append("Trabajos")
-        if col_fecha:
-            columnas.append(col_fecha)
-        columnas += [c for c in COLS_DETALLE if c != col_fecha]
-        columnas += [c for c in ("Carga", "Autorización", "Scope")
-                     if (d[c].astype(str).str.strip() != "").any()]
-        d = d[columnas].sort_values(["Territorio", "Sitio"])
-
+        d, titulo_lista, col_fecha = obtener_lista(ver, terr_sel, modo)
         st.markdown(f"**{len(d):,} sitio(s)** · {titulo_lista}"
                     + ("" if terr_sel == "Todos" else f" · {terr_sel}"))
         if fuente == FUENTE_EXCEL and not modo_arch:
@@ -775,15 +825,10 @@ def panel_detalle(prefijo):
         if d.empty:
             st.info("No hay sitios con esa condición.")
             return
-        cfg = {c: st.column_config.DateColumn(c, format="DD/MM/YYYY") for c in COLS_DETALLE}
-        if col_fecha:
-            cfg[col_fecha] = st.column_config.DateColumn(f"⭐ {col_fecha}", format="DD/MM/YYYY")
-        st.dataframe(d, hide_index=True, use_container_width=True, column_config=cfg,
+        st.dataframe(d, hide_index=True, use_container_width=True,
+                     column_config=config_columnas(col_fecha),
                      height=min(38 + 35 * len(d), 460))
-        nombre = "".join(ch if ch.isalnum() else "_" for ch in titulo_lista + "_" + terr_sel)
-        st.download_button("⬇️ Descargar lista (CSV)", d.to_csv(index=False).encode("utf-8-sig"),
-                           file_name=f"sitios_{nombre}.csv", mime="text/csv",
-                           key=f"{prefijo}_dl")
+        boton_csv(d, titulo_lista, terr_sel, f"{prefijo}_dl")
 
 
 # ---------------------------------------------------------------------------
@@ -1231,8 +1276,17 @@ with tab4:
     )
     clic_en_tabla(ev_tabla, "clk_tabla", mostrar, "t4", "Cumplen")
     if det is not None:
-        st.caption("👆 Haz clic en una casilla para ver abajo los sitios de ese hito y "
-                   "territorio. La columna *Total* muestra todos los territorios.")
+        st.caption("👆 Haz clic en una casilla: se abre una ventana con los sitios de ese hito "
+                   "y territorio. La columna *Total* muestra todos los territorios.")
+        if st.session_state.get("_sin_clic_clk_tabla"):
+            st.warning("Esta versión de Streamlit no permite hacer clic en casillas "
+                       f"(tengo la {getattr(st, '__version__', '?')}; hace falta 1.49 o más). "
+                       "Actualiza `requirements.txt` y reinicia la app (Manage app → Reboot). "
+                       "Mientras tanto usa el panel 🔍 de abajo. "
+                       f"Detalle: {st.session_state['_sin_clic_clk_tabla']}")
+        with st.expander("🛠 Diagnóstico del clic"):
+            st.caption(f"Streamlit {getattr(st, '__version__', '?')} · casilla recibida: "
+                       f"{st.session_state.get('_dbg_clk_tabla', [])}")
     if celdas_dif:
         st.caption(f"🟨 {len(celdas_dif)} celda(s) resaltada(s): el valor corregido es distinto "
                    f"al de la pestaña Resumen del Excel. Detalle en 🔧 Correcciones.")
