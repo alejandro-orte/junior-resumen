@@ -666,6 +666,56 @@ def grafico_clic(fig, key):
                            config={"displayModeBar": False})
 
 
+def leer_celda(evento, key):
+    """Celda clicada en una tabla (fila, columna) solo si la selección cambió."""
+    try:
+        celdas = list(evento["selection"]["cells"])
+    except (KeyError, TypeError, AttributeError):
+        try:
+            celdas = list(evento.selection.cells)
+        except AttributeError:
+            celdas = []
+    firma = repr(celdas)
+    if st.session_state.get("_firma_" + key) == firma:
+        return None
+    st.session_state["_firma_" + key] = firma
+    return celdas[0] if celdas else None
+
+
+def tabla_clicable(objeto, key, **kw):
+    """st.dataframe con selección de casillas (Streamlit >= 1.49). Si la versión instalada
+    no lo soporta, se muestra la tabla normal."""
+    kw_nuevo = dict(kw)
+    if kw_nuevo.pop("use_container_width", False):
+        kw_nuevo["width"] = "stretch"
+    try:
+        return st.dataframe(objeto, on_select="rerun", selection_mode="single-cell",
+                            key=key, **kw_nuevo)
+    except Exception:  # noqa: BLE001
+        st.dataframe(objeto, **kw)
+        return None
+
+
+def clic_en_tabla(evento, key, tabla, prefijo, modo):
+    """Si el usuario hizo clic en una casilla, deja el detalle apuntando a ese hito/territorio."""
+    celda = leer_celda(evento, key)
+    if celda is None:
+        return
+    try:
+        fila, col = celda
+    except (TypeError, ValueError):
+        return
+    if not isinstance(fila, int) or not (0 <= fila < len(tabla)):
+        return
+    if col in ("Total", "% del total"):
+        terr = "Todos"
+    elif col in sel_terr:
+        terr = col
+    else:
+        return
+    ir_a_detalle(prefijo, tabla.index[fila], terr, modo)
+
+
 def panel_detalle(prefijo):
     if det is None:
         return
@@ -1145,7 +1195,8 @@ with tab3:
     st.caption("👆 Haz clic en un tramo de color para ver los sitios pendientes de ese "
                "territorio y hito.")
 
-    st.dataframe(pend, use_container_width=True)
+    ev_pend = tabla_clicable(pend, "clk_pend_tabla", use_container_width=True)
+    clic_en_tabla(ev_pend, "clk_pend_tabla", pend, "t3", "Pendientes")
     panel_detalle("t3")
 
 # ---- Tab 4: Tabla ----------------------------------------------------------
@@ -1171,13 +1222,17 @@ with tab4:
                                      "font-weight: 700;")
         return estilos
 
-    st.dataframe(
+    ev_tabla = tabla_clicable(
         mostrar.style
         .background_gradient(cmap="Blues", subset=sel_terr + ["Total"], axis=None)
         .apply(resaltar, axis=None)
         .format({"% del total": "{:.1f}%"} if h_total else {}),
-        use_container_width=True, height=470,
+        "clk_tabla", use_container_width=True, height=470,
     )
+    clic_en_tabla(ev_tabla, "clk_tabla", mostrar, "t4", "Cumplen")
+    if det is not None:
+        st.caption("👆 Haz clic en una casilla para ver abajo los sitios de ese hito y "
+                   "territorio. La columna *Total* muestra todos los territorios.")
     if celdas_dif:
         st.caption(f"🟨 {len(celdas_dif)} celda(s) resaltada(s): el valor corregido es distinto "
                    f"al de la pestaña Resumen del Excel. Detalle en 🔧 Correcciones.")
@@ -1186,6 +1241,7 @@ with tab4:
         file_name=f"resumen_{'recalculado' if fuente == FUENTE_RECALC else 'excel'}.csv",
         mime="text/csv",
     )
+    panel_detalle("t4")
 
 # ---- Tab 5: Correcciones ---------------------------------------------------
 def vista_correcciones_excel():
