@@ -168,6 +168,9 @@ HITO_COL = {
     "INSRV": 17,          # R  Fecha Inservice
 }
 HITO_TEXTO = {"CARGA NEGADOS": "NEGADO", "COSITE": "COSITE"}  # columna J
+# Criterio para contar RFIC-OK
+RFIC_COMBINADO = "TSS ok + CW Lista + Orden Tx con fecha"
+RFIC_COLUMNA = "Fecha en la columna RFIC"
 
 
 def es_positivo(v) -> bool:
@@ -186,7 +189,8 @@ def es_positivo(v) -> bool:
 
 
 def recalcular_desde_sitios(raw_sitios: pd.DataFrame, df_excel: pd.DataFrame,
-                            territorios: list, proyecto: str) -> pd.DataFrame:
+                            territorios: list, proyecto: str,
+                            criterio: str = RFIC_COLUMNA) -> pd.DataFrame:
     s = raw_sitios.iloc[1:]  # fila 0 = encabezados
     s = s[s[COL_SITIOS["proyecto"]].astype(str).str.strip().str.upper() == _norm(proyecto)]
 
@@ -205,6 +209,10 @@ def recalcular_desde_sitios(raw_sitios: pd.DataFrame, df_excel: pd.DataFrame,
             col = HITO_COL[clave]
             mask = (pd.Series(True, index=s.index) if col is None
                     else s[col].map(es_positivo))
+            if clave == "RFIC-OK" and criterio == RFIC_COMBINADO:
+                mask = (s[HITO_COL["TSS APROBADOS"]].map(es_positivo)
+                        & s[HITO_COL["OBRA CIVIL OK"]].map(es_positivo)
+                        & s[HITO_COL["DISEÑO TX"]].map(es_positivo))
         elif clave in HITO_TEXTO:
             mask = s[COL_SITIOS["carga"]].astype(str).str.strip().str.upper() == HITO_TEXTO[clave]
         else:
@@ -261,7 +269,8 @@ def asignar_etapa(det: pd.DataFrame) -> pd.Series:
     return det.apply(etapa, axis=1)
 
 
-def construir_detalle(raw_sitios: pd.DataFrame, territorios: list, proyecto: str) -> pd.DataFrame:
+def construir_detalle(raw_sitios: pd.DataFrame, territorios: list, proyecto: str,
+                      criterio: str = RFIC_COLUMNA) -> pd.DataFrame:
     """Una fila por sitio del proyecto, con su territorio, fechas y si cumple cada hito."""
     s = raw_sitios.iloc[1:]
     s = s[s[COL_SITIOS["proyecto"]].astype(str).str.strip().str.upper() == _norm(proyecto)]
@@ -275,6 +284,11 @@ def construir_detalle(raw_sitios: pd.DataFrame, territorios: list, proyecto: str
         det[nombre] = s[col].map(a_fecha)
     for clave, col in HITO_COL.items():
         det["ok_" + clave] = True if col is None else s[col].map(es_positivo)
+    if criterio == RFIC_COMBINADO:
+        det["ok_RFIC-OK"] = (det["ok_TSS APROBADOS"] & det["ok_OBRA CIVIL OK"]
+                             & det["ok_DISEÑO TX"])
+        det["RFIC"] = det[["TSS OK", "Obra civil OK", "Diseño TX"]].max(axis=1).where(
+            det["ok_RFIC-OK"])
     carga = s[COL_SITIOS["carga"]].astype(str).str.strip().str.upper()
     for clave, txt in HITO_TEXTO.items():
         det["ok_" + clave] = carga == txt
@@ -287,7 +301,7 @@ def construir_detalle(raw_sitios: pd.DataFrame, territorios: list, proyecto: str
 
 
 @st.cache_data(show_spinner="Leyendo archivo…")
-def cargar(contenido: bytes):
+def cargar(contenido: bytes, criterio: str = RFIC_COLUMNA):
     tipo = tipo_contenido(contenido)
     if tipo == "cifrado":
         raise ValueError(MENSAJE_CIFRADO)
@@ -315,8 +329,9 @@ def cargar(contenido: bytes):
     else:
         try:
             raw_s = pd.read_excel(xls, sheet_name=hoja_s, header=None)
-            df_recalc, sin_terr = recalcular_desde_sitios(raw_s, df_excel, territorios, total_col)
-            det = construir_detalle(raw_s, territorios, total_col)
+            df_recalc, sin_terr = recalcular_desde_sitios(
+                raw_s, df_excel, territorios, total_col, criterio)
+            det = construir_detalle(raw_s, territorios, total_col, criterio)
         except Exception as e:  # noqa: BLE001
             error_recalc = f"No se pudo recalcular desde '{HOJA_SITIOS}': {e}"
     return df_excel, df_recalc, sin_terr, det, territorios, total_col, info, error_recalc
@@ -547,7 +562,8 @@ def planes_disponibles(rf_bytes: bytes, rf_nombre: str, sitios: tuple) -> list:
 
 
 @st.cache_data(show_spinner="Calculando…")
-def procesar_archivos(rf_bytes, rf_nombre, bl_bytes, bl_nombre, sitios: tuple, planes: tuple):
+def procesar_archivos(rf_bytes, rf_nombre, bl_bytes, bl_nombre, sitios: tuple, planes: tuple,
+                      criterio: str = RFIC_COLUMNA):
     """Arma el resumen por territorio y el detalle por sitio desde RF + baseline."""
     rf = leer_tabla(rf_bytes, rf_nombre, ("RF",), RF_REQ)
     bl = leer_tabla(bl_bytes, bl_nombre, ("baseline",), BL_REQ)
@@ -585,6 +601,24 @@ def procesar_archivos(rf_bytes, rf_nombre, bl_bytes, bl_nombre, sitios: tuple, p
         det[HITO_A_DETALLE[clave_h]] = [ag["max"].get(k, pd.NaT) if ok.get(k, False) else pd.NaT
                                         for k in claves]
     det["ok_TOTAL SITIOS"] = True
+
+    # RFIC-OK combinado: cada trabajo debe tener fecha en TSS ok, CW Lista y Orden Tx
+    if criterio == RFIC_COMBINADO:
+        cols3 = [next((mrf[c] for c in HITO_RF[k] if c in mrf), None)
+                 for k in ("TSS APROBADOS", "OBRA CIVIL OK", "DISEÑO TX")]
+        if any(c is None for c in cols3):
+            faltantes.append("RFIC combinado (falta alguna de: TSS ok, CW Lista, Orden Tx)")
+            det["ok_RFIC-OK"] = False
+            det["RFIC"] = pd.NaT
+        else:
+            f3 = pd.DataFrame({i: r[c].map(a_fecha) for i, c in enumerate(cols3)})
+            job_ok = f3.notna().all(axis=1)
+            tmp = pd.DataFrame({"_k": r["_k"], "ok": job_ok, "f": f3.max(axis=1).where(job_ok)})
+            ag = tmp.groupby("_k").agg(n_ok=("ok", "sum"), mx=("f", "max"))
+            ok = (ag["n_ok"] == n_jobs.reindex(ag.index)) & (ag["n_ok"] > 0)
+            det["ok_RFIC-OK"] = [bool(ok.get(k, False)) for k in claves]
+            det["RFIC"] = [ag["mx"].get(k, pd.NaT) if ok.get(k, False) else pd.NaT
+                           for k in claves]
 
     # Carga: negado / cosite
     ccol = mrf.get("carga")
@@ -860,6 +894,15 @@ with st.sidebar:
         st.caption("Se lee la pestaña **Resumen** y se recalcula desde **Sitios**. El archivo "
                    "no se guarda en ningún lado.")
 
+with st.sidebar:
+    st.header("⚙️ Criterio de RFIC-OK")
+    criterio_rfic = st.radio(
+        "RFIC-OK se cuenta cuando…", [RFIC_COMBINADO, RFIC_COLUMNA], key="criterio_rfic",
+        help="• TSS ok + CW Lista + Orden Tx con fecha: el sitio cuenta cuando todos sus "
+             "trabajos tienen fecha en esas tres columnas de RF.\n"
+             "• Fecha en la columna RFIC: el criterio anterior.\n"
+             "No aplica a la vista «Resumen del Excel», que muestra los valores tal cual.")
+
 st.title("📡 Dashboard Resumen · Modernización")
 
 df_excel = sin_terr = det = calidad = error_recalc = None
@@ -897,7 +940,7 @@ if modo_arch:
     try:
         df_recalc, det, sin_terr, calidad = procesar_archivos(
             f_rf.getvalue(), f_rf.name, f_bl.getvalue(), f_bl.name,
-            tuple(sitios), tuple(planes_sel))
+            tuple(sitios), tuple(planes_sel), criterio_rfic)
     except Exception as e:  # noqa: BLE001
         st.error(f"No se pudo procesar: {e}")
         st.stop()
@@ -911,7 +954,7 @@ else:
         st.info("Sube el archivo de control en la barra lateral para ver el resumen.")
         st.stop()
     try:
-        df_excel, df_recalc, sin_terr, det, terr_excel, total_col, info, error_recalc = cargar(archivo.getvalue())
+        df_excel, df_recalc, sin_terr, det, terr_excel, total_col, info, error_recalc = cargar(archivo.getvalue(), criterio_rfic)
     except Exception as e:  # noqa: BLE001
         st.error(f"No se pudo leer el archivo: {e}")
         st.stop()
@@ -950,7 +993,9 @@ if df_excel is not None and df_recalc is not None:
             diferencias.append({"Hito": h, "Columna": "Total", "Excel": a, "Recalculado": b})
 
 st.caption(f"Región **{info['region']}** · Proyecto **{total_col}** · "
-           + (f"Fuente: **{origen}**" if modo_arch else f"Fuente: **{fuente}** · Archivo: {origen}"))
+           + (f"Fuente: **{origen}**" if modo_arch else f"Fuente: **{fuente}** · Archivo: {origen}")
+           + (" · RFIC-OK = TSS ok + CW Lista + Orden Tx" if criterio_rfic == RFIC_COMBINADO
+              and fuente == FUENTE_RECALC else ""))
 
 # Filtro de territorios
 with st.sidebar:
@@ -1327,7 +1372,11 @@ def vista_correcciones_excel():
         st.dataframe(sin_terr, hide_index=True, use_container_width=True)
 
     h_rfic = buscar(df, "RFIC-OK")
-    if h_rfic and df_recalc is not None and int(df_recalc.loc[h_rfic, "Total"]) == 0:
+    if (h_rfic and df_recalc is not None and criterio_rfic == RFIC_COMBINADO
+            and int(df_recalc.loc[h_rfic, "Total"]) == 0):
+        st.info("**RFIC-OK está en 0:** ningún sitio tiene fecha en TSS OK, obra civil y "
+                "diseño TX a la vez.")
+    elif h_rfic and df_recalc is not None and int(df_recalc.loc[h_rfic, "Total"]) == 0:
         st.info("**RFIC-OK sigue en 0 aunque ya está bien calculado:** en Sitios un sitio "
                 "solo cuenta si **todos** sus trabajos tienen fecha de RFIC, y casi ningún "
                 "trabajo la tiene en la pestaña RF. Es un tema de los datos de origen, "
@@ -1359,7 +1408,10 @@ def vista_calidad():
         st.success("Todos los sitios tienen territorio y trabajos en RF.")
 
     h_rfic = buscar(df, "RFIC-OK")
-    if h_rfic and int(df.loc[h_rfic, "Total"]) == 0:
+    if h_rfic and int(df.loc[h_rfic, "Total"]) == 0 and criterio_rfic == RFIC_COMBINADO:
+        st.info("**RFIC-OK está en 0:** ningún sitio tiene TSS ok, CW Lista y Orden Tx con "
+                "fecha en todos sus trabajos.")
+    elif h_rfic and int(df.loc[h_rfic, "Total"]) == 0:
         st.info("**RFIC-OK está en 0:** casi ningún trabajo tiene fecha de RFIC en RF, y un "
                 "sitio solo cuenta cuando todos sus trabajos la tienen. Es un tema de los "
                 "datos de origen.")
