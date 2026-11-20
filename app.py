@@ -836,10 +836,69 @@ def config_columnas(col_fecha):
     return cfg
 
 
-def boton_csv(d, titulo_lista, terr_sel, key):
+def excel_bytes(tabla, hoja="Datos", titulo=None, indice=False, destacar=None):
+    """Excel ordenado: título, encabezado azul, filtros, columnas ajustadas y fechas dd/mm/aaaa."""
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    t = tabla.reset_index() if indice else tabla.copy()
+    for c in t.columns:  # fechas sin hora y sin NaT
+        if pd.api.types.is_datetime64_any_dtype(t[c]):
+            t[c] = t[c].dt.date.where(t[c].notna(), None)
+    fila0 = 3 if titulo else 1
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        t.to_excel(w, sheet_name=hoja[:31], index=False, startrow=fila0 - 1)
+        ws = w.sheets[hoja[:31]]
+        linea = Side(style="thin", color="D9D9D9")
+        borde = Border(left=linea, right=linea, top=linea, bottom=linea)
+        if titulo:
+            ws.cell(1, 1, titulo).font = Font(bold=True, size=14, color="1F3864")
+            ws.cell(2, 1, f"Generado el {datetime.date.today():%d/%m/%Y}").font = Font(
+                italic=True, size=9, color="7F7F7F")
+        for j, col in enumerate(t.columns, start=1):
+            h = ws.cell(fila0, j)
+            h.font = Font(bold=True, color="FFFFFF")
+            h.fill = PatternFill("solid", fgColor="2A78D6")
+            h.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            h.border = borde
+            ancho = max([len(str(col))] + [len(str(x)) for x in t[col].head(500)
+                                            if x is not None and not pd.isna(x)])
+            ws.column_dimensions[get_column_letter(j)].width = min(max(ancho + 3, 10), 45)
+            for i in range(len(t)):
+                c = ws.cell(fila0 + 1 + i, j)
+                c.border = borde
+                if isinstance(c.value, (datetime.date, datetime.datetime)):
+                    c.number_format = "DD/MM/YYYY"
+                    c.alignment = Alignment(horizontal="center")
+                elif isinstance(c.value, (int, float)):
+                    c.alignment = Alignment(horizontal="center")
+                    if isinstance(c.value, float):
+                        c.number_format = "0.0"
+                if i % 2 == 1:
+                    c.fill = PatternFill("solid", fgColor="F3F7FC")
+        if destacar:  # {(fila_0, columna_nombre)} en amarillo
+            pos = {c: j for j, c in enumerate(t.columns, start=1)}
+            for i, cn in destacar:
+                if cn in pos:
+                    ws.cell(fila0 + 1 + i, pos[cn]).fill = PatternFill("solid", fgColor="EDA100")
+        ws.row_dimensions[fila0].height = 30
+        ws.freeze_panes = ws.cell(fila0 + 1, 2 if indice else 1)
+        if len(t):
+            ws.auto_filter.ref = f"A{fila0}:{get_column_letter(len(t.columns))}{fila0 + len(t)}"
+        ws.sheet_view.showGridLines = False
+    return buf.getvalue()
+
+
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def boton_excel(d, titulo_lista, terr_sel, key):
     nombre = "".join(ch if ch.isalnum() else "_" for ch in titulo_lista + "_" + terr_sel)
-    args = ("⬇️ Descargar lista (CSV)", d.to_csv(index=False).encode("utf-8-sig"))
-    kw = dict(file_name=f"sitios_{nombre}.csv", mime="text/csv", key=key)
+    sub = titulo_lista + ("" if terr_sel == "Todos" else f" · {terr_sel}")
+    args = ("⬇️ Descargar lista (Excel)",
+            excel_bytes(d, "Sitios", f"Sitios · {sub} ({len(d)})"))
+    kw = dict(file_name=f"sitios_{nombre}.xlsx", mime=XLSX_MIME, key=key)
     try:
         st.download_button(*args, on_click="ignore", **kw)  # sin recargar la página
     except TypeError:
@@ -859,7 +918,7 @@ def ventana_sitios(ver, terr_sel, modo):
         return
     st.dataframe(d, hide_index=True, width="stretch", column_config=config_columnas(col_fecha),
                  height=min(38 + 35 * len(d), 420))
-    boton_csv(d, titulo_lista, terr_sel, "dlg_dl")
+    boton_excel(d, titulo_lista, terr_sel, "dlg_dl")
 
 
 def panel_detalle(prefijo):
@@ -899,7 +958,7 @@ def panel_detalle(prefijo):
         st.dataframe(d, hide_index=True, use_container_width=True,
                      column_config=config_columnas(col_fecha),
                      height=min(38 + 35 * len(d), 460))
-        boton_csv(d, titulo_lista, terr_sel, f"{prefijo}_dl")
+        boton_excel(d, titulo_lista, terr_sel, f"{prefijo}_dl")
 
 
 # ---------------------------------------------------------------------------
@@ -1472,10 +1531,13 @@ with tab4:
     if celdas_dif:
         st.caption(f"🟨 {len(celdas_dif)} celda(s) resaltada(s): el valor corregido es distinto "
                    f"al de la pestaña Resumen del Excel. Detalle en 🔧 Correcciones.")
+    _dest = {(list(mostrar.index).index(h), c) for (h, c) in celdas_dif if h in mostrar.index}
+    _tab = mostrar.rename_axis("Hito")
     st.download_button(
-        "⬇️ Descargar CSV", mostrar.to_csv().encode("utf-8-sig"),
-        file_name=f"resumen_{'recalculado' if fuente == FUENTE_RECALC else 'excel'}.csv",
-        mime="text/csv",
+        "⬇️ Descargar Excel",
+        excel_bytes(_tab, "Resumen", f"Resumen · {fuente}", indice=True, destacar=_dest),
+        file_name=f"resumen_{'recalculado' if fuente == FUENTE_RECALC else 'excel'}.xlsx",
+        mime=XLSX_MIME,
     )
     panel_detalle("t4")
 
