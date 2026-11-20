@@ -1408,26 +1408,67 @@ with tab4:
                                      "font-weight: 700;")
         return estilos
 
-    ev_tabla = tabla_clicable(
-        mostrar.style
-        .background_gradient(cmap="Blues", subset=sel_terr + ["Total"], axis=None)
-        .apply(resaltar, axis=None)
-        .format({"% del total": "{:.1f}%"} if h_total else {}),
-        "clk_tabla", use_container_width=True, height=470,
-    )
-    clic_en_tabla(ev_tabla, "clk_tabla", mostrar, "t4", "Cumplen")
-    if det is not None:
-        st.caption("👆 Haz clic en una casilla: se abre una ventana con los sitios de ese hito "
-                   "y territorio. La columna *Total* muestra todos los territorios.")
-        if st.session_state.get("_sin_clic_clk_tabla"):
-            st.warning("Esta versión de Streamlit no permite hacer clic en casillas "
-                       f"(tengo la {getattr(st, '__version__', '?')}; hace falta 1.49 o más). "
-                       "Actualiza `requirements.txt` y reinicia la app (Manage app → Reboot). "
-                       "Mientras tanto usa el panel 🔍 de abajo. "
-                       f"Detalle: {st.session_state['_sin_clic_clk_tabla']}")
-        with st.expander("🛠 Diagnóstico del clic"):
-            st.caption(f"Streamlit {getattr(st, '__version__', '?')} · casilla recibida: "
-                       f"{st.session_state.get('_dbg_clk_tabla', [])}")
+    vista = st.radio("Vista", ["🗂️ Tarjetas", "📋 Tabla"], horizontal=True,
+                     key="vista_resumen", label_visibility="collapsed")
+    corto = lambda t: t.replace("Bogota ", "").replace("Bogotá ", "")  # noqa: E731
+
+    if vista.startswith("🗂️"):
+        hitos_t = list(df.index)
+        n_col = 4
+        for i0 in range(0, len(hitos_t), n_col):
+            fila_c = st.columns(n_col)
+            for cc, h in zip(fila_c, hitos_t[i0:i0 + n_col]):
+                n = int(dfv.loc[h, "Total"])
+                es_total_h = h == h_total
+                color = (GRIS if es_total_h else VERDE if h == h_insrv
+                         else "#d6453d" if h == h_neg else "#5598e7" if h == h_cos else AZUL)
+                avance = 100 if es_total_h else pct(n, total)
+                dif_h = sorted({c for (hh, c) in celdas_dif if hh == h})
+                aviso = (f'<div style="font-size:.75rem;color:#b07a00;margin-top:2px">'
+                         f'⚠ corregido vs. Excel ({", ".join(corto(x) for x in dif_h)})</div>'
+                         if dif_h else "")
+                por_terr = " · ".join(
+                    f'<span style="color:{color_terr.get(t, GRIS)}">●</span> {corto(t)} '
+                    f'<b>{int(dfv.loc[h, t])}</b>' for t in sel_terr
+                    if t != SIN_TERRITORIO or int(dfv.loc[h, t]) > 0)
+                with cc, st.container(border=True):
+                    html(f"""<div style="border-left:5px solid {color};padding-left:10px">
+                               <div style="font-size:.85rem;opacity:.75">{h}</div>
+                               <div style="font-size:1.9rem;font-weight:700;line-height:1.2">{n:,}</div>
+                               <div style="font-size:.8rem;opacity:.65">
+                                 {"sitios del proyecto" if es_total_h else f"{avance:.0f}% de {total:,} sitios"}</div>
+                               <div style="height:5px;border-radius:3px;background:rgba(128,128,128,.2);margin:6px 0">
+                                 <div style="height:5px;border-radius:3px;width:{min(avance, 100):.0f}%;background:{color}"></div></div>
+                               <div style="font-size:.72rem;opacity:.8;line-height:1.5">{por_terr}</div>
+                               {aviso}
+                             </div>""")
+                    if det is not None and st.button("Ver sitios", key=f"btn_res_{h}",
+                                                     use_container_width=True):
+                        ir_a_detalle("t4", h, "Todos")
+        st.caption("Cada tarjeta muestra el total, el avance sobre el total de sitios y el "
+                   "desglose por territorio. Para ver un territorio específico, cambia a la "
+                   "vista 📋 Tabla y haz clic en la casilla.")
+    else:
+        ev_tabla = tabla_clicable(
+            mostrar.style
+            .background_gradient(cmap="Blues", subset=sel_terr + ["Total"], axis=None)
+            .apply(resaltar, axis=None)
+            .format({"% del total": "{:.1f}%"} if h_total else {}),
+            "clk_tabla", use_container_width=True, height=470,
+        )
+        clic_en_tabla(ev_tabla, "clk_tabla", mostrar, "t4", "Cumplen")
+        if det is not None:
+            st.caption("👆 Haz clic en una casilla: se abre una ventana con los sitios de ese hito "
+                       "y territorio. La columna *Total* muestra todos los territorios.")
+            if st.session_state.get("_sin_clic_clk_tabla"):
+                st.warning("Esta versión de Streamlit no permite hacer clic en casillas "
+                           f"(tengo la {getattr(st, '__version__', '?')}; hace falta 1.49 o más). "
+                           "Actualiza `requirements.txt` y reinicia la app (Manage app → Reboot). "
+                           "Mientras tanto usa el panel 🔍 de abajo. "
+                           f"Detalle: {st.session_state['_sin_clic_clk_tabla']}")
+            with st.expander("🛠 Diagnóstico del clic"):
+                st.caption(f"Streamlit {getattr(st, '__version__', '?')} · casilla recibida: "
+                           f"{st.session_state.get('_dbg_clk_tabla', [])}")
     if celdas_dif:
         st.caption(f"🟨 {len(celdas_dif)} celda(s) resaltada(s): el valor corregido es distinto "
                    f"al de la pestaña Resumen del Excel. Detalle en 🔧 Correcciones.")
