@@ -168,6 +168,36 @@ HITO_COL = {
     "INSRV": 17,          # R  Fecha Inservice
 }
 HITO_TEXTO = {"CARGA NEGADOS": "NEGADO", "COSITE": "COSITE"}  # columna J
+# Estados de la columna "carga" (para la pestaña 📦 Carga)
+ORDEN_CARGA = ["Viable", "Pendiente", "Cosite", "Negado", "Con fecha", "Sin dato"]
+COLOR_CARGA = {"Viable": "#1baf7a", "Pendiente": "#eda100", "Cosite": "#5598e7",
+               "Negado": "#d6453d", "Con fecha": "#8e6bd6", "Sin dato": "#c3c2b7"}
+PRIORIDAD_CARGA = ["Negado", "Cosite", "Pendiente", "Viable"]  # si un sitio tiene varios
+PREFIJO_CARGA = "Carga · "
+
+
+def estado_carga(x) -> str:
+    """Normaliza el texto de carga: 'NEGADO' -> 'Negado', vacío -> 'Sin dato'."""
+    if x is None or x is pd.NaT or (isinstance(x, float) and pd.isna(x)):
+        return "Sin dato"
+    if hasattr(x, "year"):  # hay sitios con una fecha escrita en la columna carga
+        return "Con fecha"
+    if hasattr(x, "hour") or (pd.api.types.is_number(x) and x == 0):
+        return "Sin dato"  # 0 / 00:00:00 de una fórmula: equivale a vacío
+    t = str(x).strip()
+    if not t or t.lower() in ("nan", "none", "nat"):
+        return "Sin dato"
+    return t.capitalize()
+
+
+def estado_sitio(valores) -> str:
+    """Estado de carga de un sitio con varios trabajos: gana el más crítico."""
+    v = set(valores)
+    for e in PRIORIDAD_CARGA:
+        if e in v:
+            return e
+    otros = sorted(v - {"Sin dato"})
+    return otros[0] if otros else "Sin dato"
 # Criterio para contar RFIC-OK
 RFIC_COMBINADO = "TSS ok + CW Lista + Orden Tx con fecha"
 RFIC_COLUMNA = "Fecha en la columna RFIC"
@@ -293,6 +323,7 @@ def construir_detalle(raw_sitios: pd.DataFrame, territorios: list, proyecto: str
     for clave, txt in HITO_TEXTO.items():
         det["ok_" + clave] = carga == txt
     det["Carga"] = s[COL_SITIOS["carga"]].map(lambda x: x if isinstance(x, str) else "")
+    det["Estado carga"] = s[COL_SITIOS["carga"]].map(estado_carga)
     det["Autorización"] = s[3].map(lambda x: x if isinstance(x, str) else "")
     det["Scope"] = s[21].map(lambda x: x if isinstance(x, str) else "") if 21 in s.columns else ""
 
@@ -627,7 +658,9 @@ def procesar_archivos(rf_bytes, rf_nombre, bl_bytes, bl_nombre, sitios: tuple, p
         neg = r.assign(x=r["_c"] == "NEGADO").groupby("_k")["x"].any()
         cos = r.assign(x=r["_c"] == "COSITE").groupby("_k")["x"].any()
         primera = r.groupby("_k")[ccol].first()
+        est_carga = r[ccol].map(estado_carga).groupby(r["_k"]).agg(estado_sitio)
     else:
+        est_carga = pd.Series(dtype=object)
         neg = cos = pd.Series(dtype=bool)
         primera = pd.Series(dtype=object)
         faltantes.append("Carga (columna 'carga')")
@@ -636,6 +669,7 @@ def procesar_archivos(rf_bytes, rf_nombre, bl_bytes, bl_nombre, sitios: tuple, p
     det["Carga"] = ["Negado" if neg.get(k, False) else "Cosite" if cos.get(k, False)
                     else (str(primera.get(k, "")) if pd.notna(primera.get(k, "")) else "")
                     for k in claves]
+    det["Estado carga"] = [est_carga.get(k, "Sin dato") for k in claves]
     acol = mrf.get("alcance")
     prim_a = r.groupby("_k")[acol].first() if acol else pd.Series(dtype=object)
     det["Autorización"] = [str(prim_a.get(k, "")) if pd.notna(prim_a.get(k, "")) else ""
@@ -771,6 +805,9 @@ def obtener_lista(ver, terr_sel, modo):
     if es_etapa:
         d = d[d["Etapa"] == ver[len(PREFIJO_ETAPA):]]
         titulo_lista = ver
+    elif ver.startswith(PREFIJO_CARGA):
+        d = d[d["Estado carga"] == ver[len(PREFIJO_CARGA):]]
+        titulo_lista = ver
     else:
         clave = _norm(ver)
         if "ok_" + clave in d.columns:
@@ -833,7 +870,7 @@ def panel_detalle(prefijo):
                     '<p class="panel-s">Al hacer clic en una barra o casilla se abre una ventana '
                     'con la lista. Aquí abajo también puedes elegir qué ver.</p>',
                     unsafe_allow_html=True)
-        opciones_ver = list(df.index) + [PREFIJO_ETAPA + e for e, _ in ETAPAS]
+        opciones_ver = list(df.index) + [PREFIJO_ETAPA + e for e, _ in ETAPAS] + [PREFIJO_CARGA + e for e in ORDEN_CARGA]
         opciones_terr = ["Todos"] + [t for t in sel_terr]
         for k, ops in ((f"{prefijo}_ver", opciones_ver), (f"{prefijo}_terr", opciones_terr)):
             if st.session_state.get(k) not in ops:
@@ -844,7 +881,7 @@ def panel_detalle(prefijo):
         c1, c2, c3 = st.columns([3, 2, 2])
         ver = c1.selectbox("Ver", opciones_ver, key=f"{prefijo}_ver")
         terr_sel = c2.selectbox("Territorio", opciones_terr, key=f"{prefijo}_terr")
-        es_etapa = ver.startswith(PREFIJO_ETAPA)
+        es_etapa = ver.startswith((PREFIJO_ETAPA, PREFIJO_CARGA))
         es_total = _norm(ver) == "TOTAL SITIOS"
         modo = c3.radio("Mostrar", ["Cumplen", "Pendientes"], key=f"{prefijo}_modo",
                         horizontal=True, disabled=es_etapa or es_total,
@@ -1071,8 +1108,8 @@ kpi(c[5], "Carga negados · Cosite", f"{v(h_neg)} · {v(h_cos)}", "requieren ges
 st.write("")
 
 _n5 = (int(len(calidad["sin_trabajos"]) + len(sin_terr)) if modo_arch else len(diferencias))
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📊 Embudo", "🗺️ Por territorio", "⏳ Pendientes", "📋 Tabla",
+tab1, tab2, tab_c, tab3, tab4, tab5 = st.tabs(
+    ["📊 Embudo", "🗺️ Por territorio", "📦 Carga", "⏳ Pendientes", "📋 Tabla",
      (f"🔎 Calidad de datos ({_n5})" if modo_arch else f"🔧 Correcciones ({_n5})")])
 
 hitos_embudo = [buscar(df, h) for h in ORDEN_EMBUDO]
@@ -1254,6 +1291,65 @@ with tab2:
         ir_a_detalle("t2", hito_sel, pto["x"])
     st.caption("👆 Haz clic en un territorio para ver sus sitios abajo.")
     panel_detalle("t2")
+
+# ---- Tab Carga -------------------------------------------------------------
+with tab_c:
+    dc = det[det["Territorio"].isin(sel_terr)]
+    n_c = len(dc)
+    cuentas = dc["Estado carga"].value_counts()
+    extra = [e for e in cuentas.index if e not in ORDEN_CARGA]  # estados no previstos
+    estados = [e for e in ORDEN_CARGA + extra if cuentas.get(e, 0) > 0 or e in ORDEN_CARGA[:4]]
+    st.caption("Estado de la carga de cada sitio (columna *carga*). Si un sitio tiene varios "
+               "trabajos con estados distintos, se muestra el más crítico: "
+               "Negado › Cosite › Pendiente › Viable.")
+
+    cols_e = st.columns(len(estados))
+    for ce, e in zip(cols_e, estados):
+        n = int(cuentas.get(e, 0))
+        color = COLOR_CARGA.get(e, GRIS)
+        with ce, st.container(border=True):
+            html(f"""<div style="border-left:5px solid {color};padding-left:10px">
+                       <div style="font-size:.85rem;opacity:.75">{e}</div>
+                       <div style="font-size:1.9rem;font-weight:700;line-height:1.2">{n:,}</div>
+                       <div style="font-size:.8rem;opacity:.65">{pct(n, n_c):.0f}% de {n_c:,} sitios</div>
+                     </div>""")
+            if st.button("Ver sitios", key=f"btn_carga_{e}", disabled=n == 0,
+                         use_container_width=True):
+                ir_a_detalle("t6", PREFIJO_CARGA + e, "Todos")
+
+    with st.container(border=True):
+        titulo("Carga por territorio", "Porcentaje de sitios de cada territorio por estado. "
+               "Haz clic en un tramo para ver sus sitios.")
+        tc = pd.crosstab(dc["Territorio"], dc["Estado carga"]).reindex(
+            index=sel_terr, columns=estados, fill_value=0)
+        fig_c = go.Figure()
+        for e in estados:
+            n_e = tc[e].values
+            tot_t = tc.sum(axis=1).replace(0, 1).values
+            p_e = n_e / tot_t * 100
+            fig_c.add_bar(
+                name=e, y=list(tc.index), x=p_e, orientation="h",
+                marker=dict(color=COLOR_CARGA.get(e, GRIS), line=dict(width=0)),
+                text=[f"{p:.0f}%" if p >= 7 else "" for p in p_e], textposition="inside",
+                insidetextanchor="middle", textfont=dict(size=13, color="#ffffff"),
+                customdata=n_e,
+                hovertemplate="<b>%{y}</b> · " + e + "<br>%{customdata} sitios · %{x:.1f}%<extra></extra>")
+        fig_c.update_layout(barmode="stack", bargap=.35, clickmode="event+select")
+        layout_base(fig_c, 120 + 52 * len(tc))
+        fig_c.update_xaxes(range=[0, 100], ticksuffix="%", showgrid=False)
+        fig_c.update_yaxes(autorange="reversed", showgrid=False)
+        pto = leer_click(grafico_clic(fig_c, "clk_carga"), "clk_carga")
+        if pto:
+            i = pto.get("curve_number")
+            if isinstance(i, int) and 0 <= i < len(estados) and pto.get("y") in sel_terr:
+                ir_a_detalle("t6", PREFIJO_CARGA + estados[i], pto["y"])
+
+        with st.expander("Ver números por territorio"):
+            tabla_c = tc.copy()
+            tabla_c["Total"] = tabla_c.sum(axis=1)
+            st.dataframe(tabla_c, use_container_width=True)
+
+    panel_detalle("t6")
 
 # ---- Tab 3: Pendientes -----------------------------------------------------
 with tab3:
