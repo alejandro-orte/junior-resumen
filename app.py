@@ -67,6 +67,17 @@ st.markdown(
       .kpi .lbl {font-size: .82rem; opacity: .7; margin-bottom: 2px;}
       .kpi .val {font-size: 1.9rem; font-weight: 700; line-height: 1.15;}
       .kpi .sub {font-size: .8rem; opacity: .65; margin-top: 2px;}
+      .k2 {border: 1px solid rgba(128,128,128,.25); border-radius: 12px; padding: 12px 16px;
+           background: rgba(128,128,128,.04); height: 118px; box-sizing: border-box;
+           border-left: 5px solid var(--c);}
+      .k2 .lbl {font-size: .8rem; opacity: .7; white-space: nowrap; overflow: hidden;
+                text-overflow: ellipsis;}
+      .k2 .val {font-size: 1.85rem; font-weight: 700; line-height: 1.2;}
+      .k2 .sub {font-size: .76rem; opacity: .65; white-space: nowrap;}
+      .k2 .bar {height: 5px; border-radius: 3px; background: rgba(128,128,128,.2); margin-top: 7px;}
+      .k2 .bar > div {height: 5px; border-radius: 3px; background: var(--c);}
+      .k2 .chips {display: flex; gap: 6px; margin-top: 4px;}
+      .k2 .chip {font-size: .78rem; padding: 2px 8px; border-radius: 10px; color: #fff; font-weight: 600;}
       .kpi.alerta {border-left: 4px solid #e34948;}
       .kpi.ok {border-left: 4px solid #1baf7a;}
       .kpi.info {border-left: 4px solid #2a78d6;}
@@ -389,6 +400,16 @@ def kpi(col, etiqueta, valor, sub="", tipo="info"):
             </div>""",
         unsafe_allow_html=True,
     )
+
+
+def kpi2(col, etiqueta, valor, sub="", color="#2a78d6", barra=None, extra=""):
+    """Tarjeta de indicador: borde de color, número grande y barra de avance opcional."""
+    bar = (f'<div class="bar"><div style="width:{max(0, min(barra, 100)):.0f}%"></div></div>'
+           if barra is not None else "")
+    col.markdown(
+        f'<div class="k2" style="--c:{color}"><div class="lbl">{etiqueta}</div>'
+        f'<div class="val">{valor}</div><div class="sub">{sub}</div>{bar}{extra}</div>',
+        unsafe_allow_html=True)
 
 
 def layout_base(fig, alto=380):
@@ -966,7 +987,7 @@ def panel_detalle(prefijo):
 # ---------------------------------------------------------------------------
 MODO_ARCHIVOS = "Lista de sitios + RF + baseline"
 MODO_EXCEL = "Excel completo de control"
-FUENTE_RECALC = "Recalculado"
+FUENTE_RECALC = "Recalculado (corregido)"
 FUENTE_EXCEL = "Resumen del Excel"
 
 with st.sidebar:
@@ -1156,13 +1177,20 @@ if alertas:
 
 # ---- KPIs ------------------------------------------------------------------
 c = st.columns(6)
-kpi(c[0], "Total sitios", f"{total:,}", f"{len(sel_terr)} territorio(s)")
-kpi(c[1], "TSS aprobados", f"{v(h_tss):,}", f"{pct(v(h_tss), total):.0f}% del total")
-kpi(c[2], "Instalados", f"{v(h_inst):,}", f"{pct(v(h_inst), total):.0f}% del total")
-kpi(c[3], "En servicio (InSrv)", f"{v(h_insrv):,}", f"{pct(v(h_insrv), total):.0f}% del total", "ok")
-kpi(c[4], "Pendientes por InSrv", f"{total - v(h_insrv):,}",
-    f"{pct(total - v(h_insrv), total):.0f}% del total")
-kpi(c[5], "Carga negados · Cosite", f"{v(h_neg)} · {v(h_cos)}", "requieren gestión", "alerta")
+pend = total - v(h_insrv)
+kpi2(c[0], "Total sitios", f"{total:,}", f"{len(sel_terr)} territorio(s)", GRIS)
+kpi2(c[1], "TSS aprobados", f"{v(h_tss):,}", f"{pct(v(h_tss), total):.0f}% del total",
+     AZUL, pct(v(h_tss), total))
+kpi2(c[2], "Instalados", f"{v(h_inst):,}", f"{pct(v(h_inst), total):.0f}% del total",
+     AZUL, pct(v(h_inst), total))
+kpi2(c[3], "En servicio", f"{v(h_insrv):,}", f"{pct(v(h_insrv), total):.0f}% del total",
+     "#1baf7a", pct(v(h_insrv), total))
+kpi2(c[4], "Pendientes InSrv", f"{pend:,}", f"{pct(pend, total):.0f}% del total",
+     "#eda100", pct(pend, total))
+kpi2(c[5], "Carga con alerta", f"{v(h_neg) + v(h_cos):,}", "", "#d6453d",
+     extra=(f'<div class="chips"><span class="chip" style="background:#d6453d">'
+            f'{v(h_neg)} Negado</span><span class="chip" style="background:#5598e7">'
+            f'{v(h_cos)} Cosite</span></div>'))
 
 st.write("")
 
