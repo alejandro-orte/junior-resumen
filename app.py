@@ -966,7 +966,7 @@ def panel_detalle(prefijo):
 # ---------------------------------------------------------------------------
 MODO_ARCHIVOS = "Lista de sitios + RF + baseline"
 MODO_EXCEL = "Excel completo de control"
-FUENTE_RECALC = "Recalculado (corregido)"
+FUENTE_RECALC = "Recalculado"
 FUENTE_EXCEL = "Resumen del Excel"
 
 with st.sidebar:
