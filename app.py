@@ -750,8 +750,8 @@ def ir_a_detalle(prefijo, ver, territorio="Todos", modo="Cumplen"):
     try:
         ventana_sitios(ver, territorio, modo)
     except Exception as e:  # noqa: BLE001
-        st.warning(f"No pude abrir la ventana emergente ({e}). La lista está en el panel "
-                   "🔍 de más abajo.")
+        st.warning(f"No pude abrir la ventana emergente ({e}). La lista está en la pestaña "
+                   "📋 Tabla › 🔍 Explorar sitios.")
 
 
 def grafico_clic(fig, key):
@@ -1020,7 +1020,24 @@ with st.sidebar:
              "• Fecha en la columna RFIC: el criterio anterior.\n"
              "No aplica a la vista «Resumen del Excel», que muestra los valores tal cual.")
 
-st.title("📡 Dashboard Resumen · Modernización")
+_t1, _t2 = st.columns([4, 1])
+_t1.title("📡 Dashboard Resumen · Modernización")
+presentacion = _t2.toggle("🎞️ Modo presentación", key="presentacion",
+                          help="Oculta la barra lateral, las ayudas y los botones para "
+                               "proyectar o capturar el tablero.")
+if presentacion:
+    st.markdown("<style>[data-testid='stSidebar'],[data-testid='stSidebarCollapsedControl'],"
+                "[data-testid='collapsedControl'],[data-testid='stHeader'],header"
+                "{display:none !important}.block-container{padding-top:1rem;"
+                "max-width:1400px}</style>", unsafe_allow_html=True)
+
+
+def pista(texto):
+    """Ayuda breve que no se muestra en modo presentación."""
+    if not presentacion:
+        st.caption(texto)
+
+
 
 df_excel = sin_terr = det = calidad = error_recalc = None
 diferencias = []
@@ -1170,7 +1187,7 @@ ceros = [h for h in df.index if h != h_total and h not in [h_neg, h_cos]
 if ceros:
     alertas.append(f"Hitos en cero en todos los territorios: **{', '.join(ceros)}** "
                    f"(revisar fórmula u origen del dato).")
-if alertas:
+if alertas and not presentacion:
     with st.expander(f"⚠️ {len(alertas)} observación(es) sobre los datos", expanded=False):
         for a in alertas:
             st.markdown(f"- {a}")
@@ -1195,9 +1212,12 @@ kpi2(c[5], "Carga con alerta", f"{v(h_neg) + v(h_cos):,}", "", "#d6453d",
 st.write("")
 
 _n5 = (int(len(calidad["sin_trabajos"]) + len(sin_terr)) if modo_arch else len(diferencias))
-tab1, tab2, tab_c, tab3, tab4, tab5 = st.tabs(
-    ["📊 Embudo", "🗺️ Por territorio", "📦 Carga", "⏳ Pendientes", "📋 Tabla",
-     (f"🔎 Calidad de datos ({_n5})" if modo_arch else f"🔧 Correcciones ({_n5})")])
+_nombres = ["📊 Resumen", "🗺️ Territorios", "📦 Carga", "📋 Tabla"]
+if not presentacion:
+    _nombres.append(f"🔎 Calidad de datos ({_n5})" if modo_arch else f"🔧 Correcciones ({_n5})")
+_tabs = st.tabs(_nombres)
+tab1, tab2, tab_c, tab4 = _tabs[:4]
+tab5 = _tabs[4] if len(_tabs) > 4 else None
 
 hitos_embudo = [buscar(df, h) for h in ORDEN_EMBUDO]
 hitos_embudo = [h for h in hitos_embudo if h is not None]
@@ -1244,8 +1264,8 @@ with tab1:
         fig.update_layout(clickmode="event+select")
         pto = leer_click(grafico_clic(fig, "clk_avance"), "clk_avance")
         if pto and pto.get("y") in list(df.index):
-            ir_a_detalle("t1", pto["y"])
-        st.caption("👆 Haz clic en una barra para ver sus sitios abajo.")
+            ir_a_detalle("t4", pto["y"])
+        pista("👆 Haz clic en una barra para ver sus sitios abajo.")
 
     with col_b:
         # -- En servicio -----------------------------------------------------
@@ -1330,54 +1350,88 @@ with tab1:
             if pto is not None and det is not None:
                 i = pto.get("curve_number")
                 if isinstance(i, int) and 0 <= i < len(trazas_etapa):
-                    ir_a_detalle("t1", PREFIJO_ETAPA + trazas_etapa[i])
+                    ir_a_detalle("t4", PREFIJO_ETAPA + trazas_etapa[i])
             chips = "".join(
                 f'<span class="chip"><span class="dot" style="background:{c}"></span>'
                 f'{nm} <b>{n:,}</b> <span style="opacity:.6">({pct(n, total):.0f}%)</span></span>'
                 for nm, n, c in etapas)
             st.markdown(f'<div class="chips">{chips}</div>', unsafe_allow_html=True)
 
-    panel_detalle("t1")
 
 # ---- Tab 2: Por territorio -------------------------------------------------
 with tab2:
-    st.subheader("% de avance por territorio (sobre el total de sitios de cada uno)")
-    base = dfv.loc[h_total, sel_terr].replace(0, pd.NA)
-    porc = (dfv.loc[hitos_embudo, sel_terr].div(base, axis=1) * 100).astype(float).round(1)
+    vista_t = st.radio("Ver", ["📈 Avance (%)", "⏳ Pendientes"], horizontal=True,
+                       key="vista_terr", label_visibility="collapsed")
+    if vista_t.startswith("📈"):
+        st.subheader("% de avance por territorio (sobre el total de sitios de cada uno)")
+        base = dfv.loc[h_total, sel_terr].replace(0, pd.NA)
+        porc = (dfv.loc[hitos_embudo, sel_terr].div(base, axis=1) * 100).astype(float).round(1)
 
-    heat = go.Figure(go.Heatmap(
-        z=porc.values, x=sel_terr, y=porc.index,
-        colorscale=ESCALA_SECUENCIAL, zmin=0, zmax=100,
-        text=[[f"{val:.0f}%<br>({int(dfv.loc[h, t])})" for t, val in zip(sel_terr, fila)]
-              for h, fila in zip(porc.index, porc.values)],
-        texttemplate="%{text}", xgap=2, ygap=2,
-        hovertemplate="<b>%{x}</b> · %{y}<br>%{z:.1f}% del total<extra></extra>",
-        colorbar=dict(title="%", ticksuffix="%"),
-    ))
-    layout_base(heat, 460)
-    heat.update_yaxes(autorange="reversed", showgrid=False)
-    st.plotly_chart(heat, use_container_width=True)
+        heat = go.Figure(go.Heatmap(
+            z=porc.values, x=sel_terr, y=porc.index,
+            colorscale=ESCALA_SECUENCIAL, zmin=0, zmax=100,
+            text=[[f"{val:.0f}%<br>({int(dfv.loc[h, t])})" for t, val in zip(sel_terr, fila)]
+                  for h, fila in zip(porc.index, porc.values)],
+            texttemplate="%{text}", xgap=2, ygap=2,
+            hovertemplate="<b>%{x}</b> · %{y}<br>%{z:.1f}% del total<extra></extra>",
+            colorbar=dict(title="%", ticksuffix="%"),
+        ))
+        layout_base(heat, 460)
+        heat.update_yaxes(autorange="reversed", showgrid=False)
+        st.plotly_chart(heat, use_container_width=True)
 
-    st.subheader("Comparar un hito entre territorios")
-    opciones = list(df.index)
-    hito_sel = st.selectbox("Hito", opciones,
-                            index=opciones.index(h_insrv) if h_insrv in opciones else 0)
-    vals = dfv.loc[hito_sel, sel_terr]
-    bar = go.Figure(go.Bar(
-        x=sel_terr, y=vals.values,
-        marker=dict(color=[color_terr[t] for t in sel_terr], cornerradius=4),
-        text=[f"{int(x)} · {pct(x, dfv.loc[h_total, t]):.0f}%" for t, x in zip(sel_terr, vals.values)],
-        textposition="outside", cliponaxis=False,
-        hovertemplate="<b>%{x}</b><br>" + hito_sel + ": %{y}<extra></extra>",
-    ))
-    layout_base(bar, 360)
-    bar.update_yaxes(range=[0, max(vals.max(), 1) * 1.2])
-    bar.update_layout(clickmode="event+select")
-    pto = leer_click(grafico_clic(bar, "clk_terr"), "clk_terr")
-    if pto and pto.get("x") in sel_terr:
-        ir_a_detalle("t2", hito_sel, pto["x"])
-    st.caption("👆 Haz clic en un territorio para ver sus sitios abajo.")
-    panel_detalle("t2")
+        st.subheader("Comparar un hito entre territorios")
+        opciones = list(df.index)
+        hito_sel = st.selectbox("Hito", opciones,
+                                index=opciones.index(h_insrv) if h_insrv in opciones else 0)
+        vals = dfv.loc[hito_sel, sel_terr]
+        bar = go.Figure(go.Bar(
+            x=sel_terr, y=vals.values,
+            marker=dict(color=[color_terr[t] for t in sel_terr], cornerradius=4),
+            text=[f"{int(x)} · {pct(x, dfv.loc[h_total, t]):.0f}%" for t, x in zip(sel_terr, vals.values)],
+            textposition="outside", cliponaxis=False,
+            hovertemplate="<b>%{x}</b><br>" + hito_sel + ": %{y}<extra></extra>",
+        ))
+        layout_base(bar, 360)
+        bar.update_yaxes(range=[0, max(vals.max(), 1) * 1.2])
+        bar.update_layout(clickmode="event+select")
+        pto = leer_click(grafico_clic(bar, "clk_terr"), "clk_terr")
+        if pto and pto.get("x") in sel_terr:
+            ir_a_detalle("t4", hito_sel, pto["x"])
+        pista("👆 Haz clic en un territorio para ver sus sitios abajo.")
+
+    else:
+        st.subheader("Sitios pendientes por hito y territorio")
+        st.caption("Pendiente = Total sitios del territorio − sitios que ya cumplen el hito.")
+        hitos_pend = [h for h in hitos_embudo if h != h_total]
+        pend = pd.DataFrame(
+            {t: [int(dfv.loc[h_total, t] - dfv.loc[h, t]) for h in hitos_pend] for t in sel_terr},
+            index=hitos_pend,
+        )
+        pend["Total"] = pend.sum(axis=1)
+        pend.index.name = "Hito"
+
+        fig_p = go.Figure()
+        for t in sel_terr:
+            fig_p.add_bar(name=t, y=hitos_pend, x=pend[t], orientation="h",
+                          marker=dict(color=color_terr[t], line=dict(width=0)),
+                          hovertemplate="<b>" + t + "</b><br>%{y}: %{x} pendientes<extra></extra>")
+        fig_p.update_layout(barmode="stack", bargap=.35)
+        layout_base(fig_p, 440)
+        fig_p.update_yaxes(autorange="reversed", showgrid=False)
+        fig_p.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,.18)")
+        fig_p.update_layout(clickmode="event+select")
+        pto = leer_click(grafico_clic(fig_p, "clk_pend"), "clk_pend")
+        if pto and pto.get("y") in hitos_pend:
+            i = pto.get("curve_number")
+            terr_clic = sel_terr[i] if isinstance(i, int) and 0 <= i < len(sel_terr) else "Todos"
+            ir_a_detalle("t4", pto["y"], terr_clic, "Pendientes")
+        pista("👆 Haz clic en un tramo de color para ver los sitios pendientes de ese "
+                   "territorio y hito.")
+
+        ev_pend = tabla_clicable(pend, "clk_pend_tabla", use_container_width=True)
+        clic_en_tabla(ev_pend, "clk_pend_tabla", pend, "t4", "Pendientes")
+
 
 # ---- Tab Carga -------------------------------------------------------------
 with tab_c:
@@ -1400,9 +1454,9 @@ with tab_c:
                        <div style="font-size:1.9rem;font-weight:700;line-height:1.2">{n:,}</div>
                        <div style="font-size:.8rem;opacity:.65">{pct(n, n_c):.0f}% de {n_c:,} sitios</div>
                      </div>""")
-            if st.button("Ver sitios", key=f"btn_carga_{e}", disabled=n == 0,
+            if (not presentacion) and st.button("Ver sitios", key=f"btn_carga_{e}", disabled=n == 0,
                          use_container_width=True):
-                ir_a_detalle("t6", PREFIJO_CARGA + e, "Todos")
+                ir_a_detalle("t4", PREFIJO_CARGA + e, "Todos")
 
     with st.container(border=True):
         titulo("Carga por territorio", "Porcentaje de sitios de cada territorio por estado. "
@@ -1429,48 +1483,13 @@ with tab_c:
         if pto:
             i = pto.get("curve_number")
             if isinstance(i, int) and 0 <= i < len(estados) and pto.get("y") in sel_terr:
-                ir_a_detalle("t6", PREFIJO_CARGA + estados[i], pto["y"])
+                ir_a_detalle("t4", PREFIJO_CARGA + estados[i], pto["y"])
 
         with st.expander("Ver números por territorio"):
             tabla_c = tc.copy()
             tabla_c["Total"] = tabla_c.sum(axis=1)
             st.dataframe(tabla_c, use_container_width=True)
 
-    panel_detalle("t6")
-
-# ---- Tab 3: Pendientes -----------------------------------------------------
-with tab3:
-    st.subheader("Sitios pendientes por hito y territorio")
-    st.caption("Pendiente = Total sitios del territorio − sitios que ya cumplen el hito.")
-    hitos_pend = [h for h in hitos_embudo if h != h_total]
-    pend = pd.DataFrame(
-        {t: [int(dfv.loc[h_total, t] - dfv.loc[h, t]) for h in hitos_pend] for t in sel_terr},
-        index=hitos_pend,
-    )
-    pend["Total"] = pend.sum(axis=1)
-    pend.index.name = "Hito"
-
-    fig_p = go.Figure()
-    for t in sel_terr:
-        fig_p.add_bar(name=t, y=hitos_pend, x=pend[t], orientation="h",
-                      marker=dict(color=color_terr[t], line=dict(width=0)),
-                      hovertemplate="<b>" + t + "</b><br>%{y}: %{x} pendientes<extra></extra>")
-    fig_p.update_layout(barmode="stack", bargap=.35)
-    layout_base(fig_p, 440)
-    fig_p.update_yaxes(autorange="reversed", showgrid=False)
-    fig_p.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,.18)")
-    fig_p.update_layout(clickmode="event+select")
-    pto = leer_click(grafico_clic(fig_p, "clk_pend"), "clk_pend")
-    if pto and pto.get("y") in hitos_pend:
-        i = pto.get("curve_number")
-        terr_clic = sel_terr[i] if isinstance(i, int) and 0 <= i < len(sel_terr) else "Todos"
-        ir_a_detalle("t3", pto["y"], terr_clic, "Pendientes")
-    st.caption("👆 Haz clic en un tramo de color para ver los sitios pendientes de ese "
-               "territorio y hito.")
-
-    ev_pend = tabla_clicable(pend, "clk_pend_tabla", use_container_width=True)
-    clic_en_tabla(ev_pend, "clk_pend_tabla", pend, "t3", "Pendientes")
-    panel_detalle("t3")
 
 # ---- Tab 4: Tabla ----------------------------------------------------------
 with tab4:
@@ -1529,7 +1548,7 @@ with tab4:
                                <div style="font-size:.72rem;opacity:.8;line-height:1.5">{por_terr}</div>
                                {aviso}
                              </div>""")
-                    if det is not None and st.button("Ver sitios", key=f"btn_res_{h}",
+                    if det is not None and (not presentacion) and st.button("Ver sitios", key=f"btn_res_{h}",
                                                      use_container_width=True):
                         ir_a_detalle("t4", h, "Todos")
         st.caption("Cada tarjeta muestra el total, el avance sobre el total de sitios y el "
@@ -1545,7 +1564,7 @@ with tab4:
         )
         clic_en_tabla(ev_tabla, "clk_tabla", mostrar, "t4", "Cumplen")
         if det is not None:
-            st.caption("👆 Haz clic en una casilla: se abre una ventana con los sitios de ese hito "
+            pista("👆 Haz clic en una casilla: se abre una ventana con los sitios de ese hito "
                        "y territorio. La columna *Total* muestra todos los territorios.")
             if st.session_state.get("_sin_clic_clk_tabla"):
                 st.warning("Esta versión de Streamlit no permite hacer clic en casillas "
@@ -1553,21 +1572,25 @@ with tab4:
                            "Actualiza `requirements.txt` y reinicia la app (Manage app → Reboot). "
                            "Mientras tanto usa el panel 🔍 de abajo. "
                            f"Detalle: {st.session_state['_sin_clic_clk_tabla']}")
-            with st.expander("🛠 Diagnóstico del clic"):
-                st.caption(f"Streamlit {getattr(st, '__version__', '?')} · casilla recibida: "
-                           f"{st.session_state.get('_dbg_clk_tabla', [])}")
+            if not presentacion:
+                with st.expander("🛠 Diagnóstico del clic"):
+                    st.caption(f"Streamlit {getattr(st, '__version__', '?')} · casilla recibida: "
+                               f"{st.session_state.get('_dbg_clk_tabla', [])}")
     if celdas_dif:
         st.caption(f"🟨 {len(celdas_dif)} celda(s) resaltada(s): el valor corregido es distinto "
                    f"al de la pestaña Resumen del Excel. Detalle en 🔧 Correcciones.")
     _dest = {(list(mostrar.index).index(h), c) for (h, c) in celdas_dif if h in mostrar.index}
     _tab = mostrar.rename_axis("Hito")
-    st.download_button(
-        "⬇️ Descargar Excel",
-        excel_bytes(_tab, "Resumen", f"Resumen · {fuente}", indice=True, destacar=_dest),
-        file_name=f"resumen_{'recalculado' if fuente == FUENTE_RECALC else 'excel'}.xlsx",
-        mime=XLSX_MIME,
-    )
-    panel_detalle("t4")
+    if not presentacion:
+        st.download_button(
+            "⬇️ Descargar Excel",
+            excel_bytes(_tab, "Resumen", f"Resumen · {fuente}", indice=True, destacar=_dest),
+            file_name=f"resumen_{'recalculado' if fuente == FUENTE_RECALC else 'excel'}.xlsx",
+            mime=XLSX_MIME,
+        )
+    if not presentacion:
+        with st.expander("🔍 Explorar sitios por hito, territorio o etapa"):
+            panel_detalle("t4")
 
 # ---- Tab 5: Correcciones ---------------------------------------------------
 def vista_correcciones_excel():
@@ -1644,8 +1667,9 @@ def vista_calidad():
                 "datos de origen.")
 
 
-with tab5:
-    if modo_arch:
-        vista_calidad()
-    else:
-        vista_correcciones_excel()
+if tab5 is not None:
+    with tab5:
+        if modo_arch:
+            vista_calidad()
+        else:
+            vista_correcciones_excel()
