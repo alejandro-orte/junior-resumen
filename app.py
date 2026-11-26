@@ -14,6 +14,7 @@ import datetime
 import io
 from pathlib import Path
 import unicodedata
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -998,8 +999,302 @@ def panel_detalle(prefijo):
 
 
 # ---------------------------------------------------------------------------
+# Pantalla aparte: Concepto TSS
+# ---------------------------------------------------------------------------
+CT_SIN_TERR = "Sin territorio"
+CT_ORDEN_AREA = ["RF", "Obra Civil", "Implementacion"]
+CT_COLS_SALIDA = ["Sitio", "Días hábiles", "Área sin concepto", "Territorio"]
+CT_AZUL_XL = "0070C0"     # encabezado, igual al del Excel de referencia
+CT_ZEBRA_XL = "DDEBF7"
+
+
+# ---------------------------------------------------------------------------
+# Lectura de archivos (xlsx, xls real, csv o tabla HTML disfrazada de .xls)
+# ---------------------------------------------------------------------------
+def _ct_decodificar(b: bytes) -> str:
+    for enc in ("utf-8-sig", "latin-1"):
+        try:
+            return b.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return b.decode("utf-8", errors="ignore")
+
+
+@st.cache_data(show_spinner="Leyendo archivo…")
+def ct_leer(contenido: bytes, nombre: str, requeridas: tuple) -> pd.DataFrame:
+    req = [_plano(r) for r in requeridas]
+
+    def cumple(cols):
+        c = {_plano(x) for x in cols}
+        return all(r in c for r in req)
+
+    if contenido[:4] == b"\xd0\xcf\x11\xe0" and (
+            b"E\x00n\x00c\x00r\x00y\x00p\x00t\x00e\x00d\x00P\x00a\x00c\x00k\x00a\x00g\x00e\x00"
+            in contenido):
+        raise ValueError("El archivo está protegido con contraseña o permisos. Guárdalo sin "
+                         "protección o súbelo como export directo del sistema.")
+    if contenido[:4] == b"PK\x03\x04" or contenido[:4] == b"\xd0\xcf\x11\xe0":
+        x = pd.ExcelFile(io.BytesIO(contenido))
+        for h in x.sheet_names:
+            crudo = pd.read_excel(x, sheet_name=h, header=None, nrows=15)
+            for i in range(len(crudo)):
+                if cumple([c for c in crudo.iloc[i].tolist() if pd.notna(c)]):
+                    return pd.read_excel(x, sheet_name=h, header=i)
+    else:
+        texto = _ct_decodificar(contenido)
+        if "<table" in texto[:200000].lower():
+            for t in pd.read_html(io.StringIO(texto), header=0):
+                if cumple(t.columns):
+                    return t
+        else:
+            t = pd.read_csv(io.StringIO(texto), sep=None, engine="python")
+            if cumple(t.columns):
+                return t
+    raise ValueError(f"No encontré las columnas {', '.join(requeridas)} en '{nombre}'. "
+                     "Revisa que sea el reporte correcto.")
+
+
+def ct_col(df, nombre):
+    m = {_plano(c): c for c in df.columns}
+    return m.get(_plano(nombre))
+
+
+# ---------------------------------------------------------------------------
+# Procesamiento
+# ---------------------------------------------------------------------------
+def ct_dias_habiles(desde: pd.Series, hasta: datetime.date) -> pd.Series:
+    """Igual que =DIAS.LAB(fecha; AHORA()) - 1 del Excel: lunes a viernes, ambos días incluidos."""
+    d = desde.dt.normalize()
+    ok = d.notna()
+    salida = pd.Series(np.nan, index=desde.index)
+    fin = np.datetime64(hasta) + np.timedelta64(1, "D")
+    salida[ok] = np.busday_count(d[ok].values.astype("datetime64[D]"), fin) - 1
+    return salida.clip(lower=0)
+
+
+def ct_procesar(rep: pd.DataFrame, base: pd.DataFrame | None, region: str, corte: datetime.date,
+             solo_fuera: bool):
+    c_reg, c_sit = ct_col(rep, "Region"), ct_col(rep, "Sitio")
+    c_dia, c_area = ct_col(rep, "Dia TSS"), ct_col(rep, "Area sin concepto")
+    d = rep[[c_reg, c_sit, c_dia, c_area]].copy()
+    d.columns = ["Region", "Sitio", "Dia TSS", "Área sin concepto"]
+    d = d.dropna(subset=["Sitio"])
+    d["Sitio"] = d["Sitio"].astype(str).str.strip()
+    d["Área sin concepto"] = d["Área sin concepto"].astype(str).str.strip()
+    if region != "Todas":
+        d = d[d["Region"].map(_plano) == _plano(region)]
+    d["_f"] = pd.to_datetime(d["Dia TSS"], dayfirst=True, format="mixed", errors="coerce")
+    d["Días hábiles"] = ct_dias_habiles(d["_f"], corte)
+    n_filas = len(d)
+    # Un solo registro por sitio y área: se queda el más antiguo (más días)
+    d["_k"] = d["Sitio"].map(_plano)  # "Rb" y "RB" son el mismo sitio
+    d = (d.sort_values("Días hábiles", ascending=False, na_position="last")
+          .drop_duplicates(["_k", "Área sin concepto"]))
+    if solo_fuera:
+        d = d[d["Días hábiles"] > 5]
+    if base is not None:
+        cs, ct = ct_col(base, "Sitio"), ct_col(base, "Territorio Comercial")
+        mp = (base[[cs, ct]].dropna(subset=[cs]).assign(k=lambda x: x[cs].map(_plano))
+              .drop_duplicates("k").set_index("k")[ct])
+        d["Territorio"] = d["_k"].map(mp).fillna(CT_SIN_TERR)
+        nombre = (base[[cs]].dropna().assign(k=lambda x: x[cs].map(_plano))
+                  .drop_duplicates("k").set_index("k")[cs])
+        d["Sitio"] = d["_k"].map(nombre).fillna(d["Sitio"])  # escritura oficial del baseline
+    else:
+        d["Territorio"] = ""
+    orden = {a: i for i, a in enumerate(CT_ORDEN_AREA)}
+    d["_o"] = d["Área sin concepto"].map(lambda a: orden.get(a, 99))
+    d = d.sort_values(["_o", "Días hábiles", "Sitio"], ascending=[True, False, True])
+    d["Días hábiles"] = d["Días hábiles"].fillna(0).astype(int)
+    return d[CT_COLS_SALIDA].reset_index(drop=True), n_filas
+
+
+# ---------------------------------------------------------------------------
+# Salidas: Excel e imagen
+# ---------------------------------------------------------------------------
+def ct_excel_bytes(tabla: pd.DataFrame, titulo: str) -> bytes:
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        tabla.to_excel(w, sheet_name="Concepto TSS", index=False, startrow=2)
+        ws = w.sheets["Concepto TSS"]
+        ws.cell(1, 1, titulo).font = Font(bold=True, size=14, color="1F3864")
+        linea = Side(style="thin", color="BFBFBF")
+        borde = Border(left=linea, right=linea, top=linea, bottom=linea)
+        for j, c in enumerate(tabla.columns, start=1):
+            h = ws.cell(3, j)
+            h.font = Font(bold=True, color="FFFFFF")
+            h.fill = PatternFill("solid", fgColor=CT_AZUL_XL)
+            h.alignment = Alignment(horizontal="center", vertical="center")
+            h.border = borde
+            ancho = max([len(str(c))] + [len(str(x)) for x in tabla[c]])
+            ws.column_dimensions[get_column_letter(j)].width = min(max(ancho + 4, 12), 45)
+            for i in range(len(tabla)):
+                cel = ws.cell(4 + i, j)
+                cel.border = borde
+                cel.alignment = Alignment(
+                    horizontal="right" if c == "Días hábiles" else
+                    "center" if c == "Territorio" else "left", vertical="center")
+                if i % 2 == 0:
+                    cel.fill = PatternFill("solid", fgColor=CT_ZEBRA_XL)
+        ws.row_dimensions[3].height = 22
+        ws.freeze_panes = "A4"
+        if len(tabla):
+            ws.auto_filter.ref = f"A3:{get_column_letter(len(tabla.columns))}{3 + len(tabla)}"
+        ws.sheet_view.showGridLines = False
+    return buf.getvalue()
+
+
+def _ct_fuente(tam: int, negrita: bool = False):
+    import os
+
+    import matplotlib
+    from PIL import ImageFont
+    base = os.path.join(matplotlib.get_data_path(), "fonts", "ttf")
+    candidatos = (
+        ["/usr/share/fonts/truetype/crosextra/Carlito-Bold.ttf",
+         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+         os.path.join(base, "DejaVuSans-Bold.ttf")] if negrita else
+        ["/usr/share/fonts/truetype/crosextra/Carlito-Regular.ttf",
+         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+         os.path.join(base, "DejaVuSans.ttf")])
+    for ruta in candidatos:
+        if os.path.exists(ruta):
+            return ImageFont.truetype(ruta, tam)
+    return ImageFont.load_default()
+
+
+def ct_imagen_tabla(tabla: pd.DataFrame, titulo: str | None = None) -> bytes:
+    """Tabla estilo Excel (encabezado azul, filas alternadas) como PNG para WhatsApp."""
+    from PIL import Image, ImageDraw
+    anchos = [430, 250, 300, 310]
+    alto_fila, alto_enc = 58, 62
+    alto_tit = 70 if titulo else 0
+    ancho = sum(anchos)
+    img = Image.new("RGB", (ancho, alto_tit + alto_enc + alto_fila * len(tabla) + 2), "white")
+    d = ImageDraw.Draw(img)
+    f_enc, f_txt, f_tit = _ct_fuente(28, True), _ct_fuente(27), _ct_fuente(32, True)
+    if titulo:
+        d.text((16, alto_tit // 2), titulo, font=f_tit, fill=(31, 56, 100), anchor="lm")
+    y0 = alto_tit
+    d.rectangle((0, y0, ancho, y0 + alto_enc), fill=(0, 112, 192))
+    x = 0
+    for nombre, w in zip(tabla.columns, anchos):
+        d.text((x + w // 2 - 14, y0 + alto_enc // 2), nombre, font=f_enc, fill="white", anchor="mm")
+        bx = x + w - 44  # botón de filtro, como en Excel
+        d.rectangle((bx, y0 + 16, bx + 30, y0 + 46), fill=(240, 240, 240), outline=(190, 190, 190))
+        d.polygon([(bx + 8, y0 + 27), (bx + 22, y0 + 27), (bx + 15, y0 + 37)], fill=(60, 60, 60))
+        x += w
+    for i, fila in enumerate(tabla.itertuples(index=False)):
+        y = y0 + alto_enc + i * alto_fila
+        d.rectangle((0, y, ancho, y + alto_fila), fill=(221, 235, 247) if i % 2 == 0 else "white")
+        d.line((0, y + alto_fila, ancho, y + alto_fila), fill=(200, 215, 230), width=1)
+        x = 0
+        for k, (valor, w) in enumerate(zip(fila, anchos)):
+            txt = str(valor)
+            cy = y + alto_fila // 2
+            if k == 1:
+                d.text((x + w - 96, cy), txt, font=f_txt, fill="black", anchor="rm")
+            elif k == 3:
+                d.text((x + w // 2, cy), txt, font=f_txt, fill="black", anchor="mm")
+            else:
+                d.text((x + 12, cy), txt, font=f_txt, fill="black", anchor="lm")
+            x += w
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+
+
+def pantalla_concepto_tss():
+    """Pantalla aparte: Concepto TSS pendiente por sitio y área."""
+    st.title("📨 Concepto TSS · sitios pendientes por área")
+    st.caption("Sube el reporte de Concepto TSS: se filtra la región, queda un solo registro por "
+               "sitio y área, y se generan el Excel y la imagen para WhatsApp.")
+
+    c1, c2 = st.columns(2)
+    f_rep = c1.file_uploader("1 · Reporte Concepto TSS (.xls, .xlsx, .csv)",
+                             type=["xls", "xlsx", "csv"], key="ct_rep")
+    f_bl = c2.file_uploader("2 · Baseline (para el territorio, opcional)",
+                            type=["xls", "xlsx", "csv"], key="ct_bl",
+                            help="Se usa solo para poner el territorio comercial de cada sitio.")
+    if not f_rep:
+        st.info("Sube el reporte de Concepto TSS para empezar.")
+        st.stop()
+
+    try:
+        rep = ct_leer(f_rep.getvalue(), f_rep.name, ("Region", "Sitio", "Dia TSS", "Area sin concepto"))
+    except Exception as e:  # noqa: BLE001
+        st.error(str(e))
+        st.stop()
+    base = None
+    if f_bl:
+        try:
+            base = ct_leer(f_bl.getvalue(), f_bl.name, ("Sitio", "Territorio Comercial"))
+        except Exception as e:  # noqa: BLE001
+            st.warning(f"No pude ct_leer el baseline: {e}. Sigo sin territorio.")
+
+    regiones = sorted(rep[ct_col(rep, "Region")].dropna().astype(str).str.strip().unique())
+    hoy = datetime.datetime.now(ZoneInfo("America/Bogota")).date()
+    o1, o2, o3 = st.columns([2, 2, 3])
+    region = o1.selectbox("Región", ["Todas"] + regiones,
+                          index=(regiones.index("Centro") + 1) if "Centro" in regiones else 0)
+    corte = o2.date_input("Fecha de corte", hoy, help="Los días hábiles se cuentan hasta esta fecha.")
+    solo_fuera = o3.checkbox("Solo fuera de ventana (más de 5 días hábiles)", value=False)
+    c_tit = st.checkbox("Agregar título y fecha en la imagen", value=False)
+    por_img = st.slider("Filas por imagen", 10, 60, 30, help="Si hay más filas, se parte en varias "
+                                                             "imágenes para que se lean bien en WhatsApp.")
+
+    tabla, n_filas = ct_procesar(rep, base, region, corte, solo_fuera)
+    if tabla.empty:
+        st.warning("No hay sitios con esa selección.")
+        st.stop()
+    if base is None:
+        tabla = tabla.drop(columns=["Territorio"])
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Sitios únicos", f"{tabla['Sitio'].nunique():,}")
+    k2.metric("Registros (sitio + área)", f"{len(tabla):,}", help=f"Había {n_filas:,} filas en el reporte.")
+    k3.metric("Fuera de ventana (>5 días)", f"{int((tabla['Días hábiles'] > 5).sum()):,}")
+    k4.metric("Máx. días hábiles", f"{int(tabla['Días hábiles'].max())}")
+
+    por_area = tabla["Área sin concepto"].value_counts()
+    st.caption("Por área: " + " · ".join(f"**{a}** {int(n)}" for a, n in
+                                          por_area.reindex([a for a in CT_ORDEN_AREA if a in por_area.index]
+                                                           + [a for a in por_area.index if a not in CT_ORDEN_AREA]).items()))
+    st.dataframe(tabla, hide_index=True, width="stretch", height=min(40 + 35 * len(tabla), 520))
+
+    titulo = f"Concepto TSS · {region} · {corte:%d/%m/%Y}"
+    st.subheader("Descargas")
+    d1, d2 = st.columns(2)
+    d1.download_button("⬇️ Descargar Excel", ct_excel_bytes(tabla, titulo),
+                       file_name=f"concepto_tss_{_plano(region).replace(' ', '_')}_{corte:%Y%m%d}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    partes = [tabla.iloc[i:i + por_img] for i in range(0, len(tabla), por_img)]
+    st.markdown("**Imagen para WhatsApp**" + (f" · {len(partes)} imágenes" if len(partes) > 1 else ""))
+    for n, parte in enumerate(partes, start=1):
+        t_img = (titulo + (f" ({n}/{len(partes)})" if len(partes) > 1 else "")) if c_tit else None
+        png = ct_imagen_tabla(parte, t_img)
+        st.image(png, width=640)
+        st.download_button(f"⬇️ Descargar imagen{f' {n}' if len(partes) > 1 else ''} (PNG)", png,
+                           file_name=f"concepto_tss_{n}.png", mime="image/png", key=f"png_{n}")
+
+
+
+# ---------------------------------------------------------------------------
 # Interfaz
 # ---------------------------------------------------------------------------
+PANTALLA_DASH = "📊 Dashboard Modernización"
+PANTALLA_TSS = "📨 Concepto TSS"
+with st.sidebar:
+    pantalla = st.radio("Pantalla", [PANTALLA_DASH, PANTALLA_TSS], key="pantalla")
+if pantalla == PANTALLA_TSS:
+    pantalla_concepto_tss()
+    st.stop()
+
 MODO_ARCHIVOS = "Lista de sitios + RF + baseline"
 MODO_EXCEL = "Excel completo de control"
 FUENTE_RECALC = "Recalculado (corregido)"
