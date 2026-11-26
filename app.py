@@ -12,6 +12,8 @@ Ejecutar:
 import base64
 import datetime
 import io
+import json
+import zipfile
 from pathlib import Path
 import unicodedata
 from zoneinfo import ZoneInfo
@@ -999,6 +1001,169 @@ def panel_detalle(prefijo):
 
 
 # ---------------------------------------------------------------------------
+# Datos publicados: quien administra sube los archivos una vez y los demás solo ven
+# ---------------------------------------------------------------------------
+DIR_PUB = Path(__file__).parent / "datos_publicados"
+
+
+@st.cache_resource
+def _memoria_pub() -> dict:
+    return {}
+
+
+class ArchivoPub:
+    """Archivo publicado, con la misma interfaz que un archivo subido (name, getvalue)."""
+
+    def __init__(self, nombre, datos):
+        self.name, self._d = nombre, datos
+
+    def getvalue(self):
+        return self._d
+
+
+def _ahora() -> str:
+    return datetime.datetime.now(ZoneInfo("America/Bogota")).strftime("%d/%m/%Y %H:%M")
+
+
+def _decodificar_pub(b: bytes) -> str:
+    try:
+        return b.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return b.decode("latin-1")
+
+
+def pub_meta() -> dict:
+    mem = _memoria_pub()
+    if "meta" in mem:
+        return mem["meta"]
+    try:
+        meta = json.loads((DIR_PUB / "meta.json").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        meta = {}
+    return meta
+
+
+def pub_archivo(clave):
+    nombre = pub_meta().get("archivos", {}).get(clave)
+    if not nombre:
+        return None
+    mem = _memoria_pub()
+    datos = mem.get(clave)
+    if datos is None:
+        try:
+            datos = (DIR_PUB / nombre).read_bytes()
+        except Exception:  # noqa: BLE001
+            return None
+        mem[clave] = datos
+    return ArchivoPub(nombre, datos)
+
+
+def pub_guardar(entradas: dict, extra: dict):
+    """entradas: {clave: (nombre_original, bytes)}. Guarda en memoria y, si se puede, en disco."""
+    mem = _memoria_pub()
+    meta = json.loads(json.dumps(pub_meta())) if pub_meta() else {}
+    meta.setdefault("archivos", {})
+    aviso = None
+    try:
+        DIR_PUB.mkdir(exist_ok=True)
+    except Exception as e:  # noqa: BLE001
+        aviso = str(e)
+    for clave, (nombre, datos) in entradas.items():
+        guardado = f"{clave}{Path(nombre).suffix.lower() or '.dat'}"
+        mem[clave] = datos
+        meta["archivos"][clave] = guardado
+        try:
+            (DIR_PUB / guardado).write_bytes(datos)
+        except Exception as e:  # noqa: BLE001
+            aviso = str(e)
+    meta.update(extra)
+    meta["publicado"] = _ahora()
+    mem["meta"] = meta
+    try:
+        (DIR_PUB / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1),
+                                           encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        aviso = str(e)
+    return aviso
+
+
+def pub_borrar():
+    mem = _memoria_pub()
+    for clave in list(pub_meta().get("archivos", {})):
+        nombre = pub_meta()["archivos"][clave]
+        try:
+            (DIR_PUB / nombre).unlink()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        (DIR_PUB / "meta.json").unlink()
+    except Exception:  # noqa: BLE001
+        pass
+    mem.clear()
+    mem["meta"] = {}
+
+
+def pub_zip() -> bytes:
+    """Paquete con la carpeta datos_publicados para subirla a GitHub y que no se pierda."""
+    buf = io.BytesIO()
+    meta = pub_meta()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for clave, nombre in meta.get("archivos", {}).items():
+            f = pub_archivo(clave)
+            if f is not None:
+                z.writestr(f"datos_publicados/{nombre}", f.getvalue())
+        z.writestr("datos_publicados/meta.json", json.dumps(meta, ensure_ascii=False, indent=1))
+    return buf.getvalue()
+
+
+def es_administrador() -> bool:
+    """Sin ADMIN_PASSWORD en los Secrets, todos pueden publicar. Con clave, solo quien la sepa."""
+    try:
+        clave = st.secrets.get("ADMIN_PASSWORD")
+    except Exception:  # noqa: BLE001
+        clave = None
+    if not clave:
+        return True
+    if st.session_state.get("_admin_ok"):
+        return True
+    with st.sidebar.expander("🔐 Administrador"):
+        intento = st.text_input("Clave", type="password", key="clave_admin")
+        if intento and intento == clave:
+            st.session_state["_admin_ok"] = True
+            st.rerun()
+        elif intento:
+            st.error("Clave incorrecta.")
+    return False
+
+
+def bloque_publicar(entradas: dict, extra: dict):
+    """Botones de publicación (solo administradores)."""
+    with st.sidebar:
+        st.header("📢 Publicar")
+        meta = pub_meta()
+        if meta.get("publicado"):
+            st.caption(f"Publicado el {meta['publicado']}. Quien abra el enlace verá estos datos "
+                       "sin subir nada.")
+        if entradas and st.button("📢 Publicar para todos", key="btn_publicar", width="stretch",
+                     help="Guarda los archivos actuales en el servidor para que cualquiera que "
+                          "abra el enlace vea la información sin subir archivos."):
+            aviso = pub_guardar(entradas, extra)
+            st.success("Publicado. Ya lo ven todos los que abran el enlace.")
+            if aviso:
+                st.warning("Quedó en la memoria de la app, pero no pude escribir en disco "
+                           f"({aviso}).")
+        if meta.get("archivos"):
+            st.download_button(
+                "⬇️ Paquete para GitHub (.zip)", pub_zip(), file_name="datos_publicados.zip",
+                mime="application/zip", key="dl_pub_zip",
+                help="Descomprime y sube la carpeta datos_publicados a tu repositorio de GitHub: "
+                     "así la información se conserva aunque la app se reinicie.")
+            if st.button("🗑️ Quitar datos publicados", key="btn_quitar_pub", width="stretch"):
+                pub_borrar()
+                st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Pantalla aparte: Concepto TSS
 # ---------------------------------------------------------------------------
 CT_SIN_TERR = "Sin territorio"
@@ -1214,14 +1379,25 @@ def pantalla_concepto_tss():
     st.caption("Sube el reporte de Concepto TSS: se filtra la región, queda un solo registro por "
                "sitio y área, y se generan el Excel y la imagen para WhatsApp.")
 
-    c1, c2 = st.columns(2)
-    f_rep = c1.file_uploader("1 · Reporte Concepto TSS (.xls, .xlsx, .csv, .htm, .html)",
-                             type=["xls", "xlsx", "csv", "htm", "html"], key="ct_rep")
-    f_bl = c2.file_uploader("2 · Baseline (para el territorio, opcional; .xls, .htm, .html…)",
-                            type=["xls", "xlsx", "csv", "htm", "html"], key="ct_bl",
-                            help="Se usa solo para poner el territorio comercial de cada sitio.")
+    meta_p = pub_meta()
+    hay_pub = "concepto" in meta_p.get("archivos", {})
+    f_rep = f_bl = None
+    if ES_ADMIN or not hay_pub:
+        c1, c2 = st.columns(2)
+        f_rep = c1.file_uploader("1 · Reporte Concepto TSS (.xls, .xlsx, .csv, .htm, .html)",
+                                 type=["xls", "xlsx", "csv", "htm", "html"], key="ct_rep")
+        f_bl = c2.file_uploader("2 · Baseline (para el territorio, opcional; .xls, .htm, .html…)",
+                                type=["xls", "xlsx", "csv", "htm", "html"], key="ct_bl",
+                                help="Se usa solo para poner el territorio comercial de cada sitio.")
+    subido_rep, subido_bl = f_rep, f_bl
+    f_rep = f_rep or pub_archivo("concepto")
+    f_bl = f_bl or pub_archivo("baseline")
+    if hay_pub and f_rep is not None and subido_rep is None:
+        st.caption(f"📢 Reporte publicado el {meta_p.get('publicado', '—')}"
+                   + (" · puedes subir uno nuevo para verlo." if ES_ADMIN else "."))
     if not f_rep:
-        st.info("Sube el reporte de Concepto TSS para empezar.")
+        st.info("Sube el reporte de Concepto TSS para empezar." if ES_ADMIN or not hay_pub
+                else "Todavía no hay un reporte publicado.")
         st.stop()
 
     try:
@@ -1234,7 +1410,7 @@ def pantalla_concepto_tss():
         try:
             base = ct_leer(f_bl.getvalue(), f_bl.name, ("Sitio", "Territorio Comercial"))
         except Exception as e:  # noqa: BLE001
-            st.warning(f"No pude ct_leer el baseline: {e}. Sigo sin territorio.")
+            st.warning(f"No pude leer el baseline: {e}. Sigo sin territorio.")
 
     regiones = sorted(rep[ct_col(rep, "Region")].dropna().astype(str).str.strip().unique())
     hoy = datetime.datetime.now(ZoneInfo("America/Bogota")).date()
@@ -1266,6 +1442,16 @@ def pantalla_concepto_tss():
                                                            + [a for a in por_area.index if a not in CT_ORDEN_AREA]).items()))
     st.dataframe(tabla, hide_index=True, width="stretch", height=min(40 + 35 * len(tabla), 520))
 
+    if ES_ADMIN and (subido_rep is not None or subido_bl is not None):
+        ent = {}
+        if subido_rep is not None:
+            ent["concepto"] = (subido_rep.name, subido_rep.getvalue())
+        if subido_bl is not None:
+            ent["baseline"] = (subido_bl.name, subido_bl.getvalue())
+        bloque_publicar(ent, {})
+    elif ES_ADMIN and hay_pub:
+        bloque_publicar({}, {})
+
     titulo = f"Concepto TSS · {region} · {corte:%d/%m/%Y}"
     st.subheader("Descargas")
     d1, d2 = st.columns(2)
@@ -1291,6 +1477,7 @@ PANTALLA_DASH = "📊 Dashboard Modernización"
 PANTALLA_TSS = "📨 Concepto TSS"
 with st.sidebar:
     pantalla = st.radio("Pantalla", [PANTALLA_DASH, PANTALLA_TSS], key="pantalla")
+ES_ADMIN = es_administrador()
 if pantalla == PANTALLA_TSS:
     pantalla_concepto_tss()
     st.stop()
@@ -1300,26 +1487,43 @@ MODO_EXCEL = "Excel completo de control"
 FUENTE_RECALC = "Recalculado (corregido)"
 FUENTE_EXCEL = "Resumen del Excel"
 
+_pub = pub_meta()
+_arch_pub = _pub.get("archivos", {})
+_hay_pub = bool(_arch_pub)
+_mostrar_carg = ES_ADMIN or not _hay_pub
 with st.sidebar:
     st.header("📂 Datos")
-    modo = st.radio("¿Qué vas a subir?", [MODO_ARCHIVOS, MODO_EXCEL], key="modo_carga")
+    if _mostrar_carg:
+        _modos = [MODO_ARCHIVOS, MODO_EXCEL]
+        modo = st.radio("¿Qué vas a subir?", _modos, key="modo_carga",
+                        index=1 if _pub.get("modo") == "excel" else 0)
+    else:
+        modo = MODO_EXCEL if _pub.get("modo") == "excel" else MODO_ARCHIVOS
     modo_arch = modo == MODO_ARCHIVOS
-    if modo_arch:
+    f_sitios = f_rf = f_bl = archivo = None
+    txt_sitios = ""
+    proyecto, region_txt = _pub.get("proyecto", "MODERNIZACION_2026"), _pub.get("region", "R4")
+    if _hay_pub:
+        st.caption(f"📢 Datos publicados el {_pub.get('publicado', '—')}"
+                   + (". Si subes archivos nuevos, se usan en vez de los publicados."
+                      if ES_ADMIN else "."))
+    if modo_arch and _mostrar_carg:
         f_sitios = st.file_uploader("1 · Lista de sitios (.csv, .txt, .xlsx)",
                                     type=["csv", "txt", "xlsx", "xlsm"], key="up_sitios")
         txt_sitios = st.text_area("…o pega los nombres (uno por línea)", height=90,
                                   key="txt_sitios")
-        f_rf = st.file_uploader("2 · Export de RF (.xls, .xlsx, .csv, .htm, .html)", type=["xlsx", "xlsm", "xls", "csv", "htm", "html"],
-                                key="up_rf")
-        f_bl = st.file_uploader("3 · Export de baseline (.xls, .xlsx, .csv)",
+        f_rf = st.file_uploader("2 · Export de RF (.xls, .xlsx, .csv, .htm, .html)",
+                                type=["xlsx", "xlsm", "xls", "csv", "htm", "html"], key="up_rf")
+        f_bl = st.file_uploader("3 · Export de baseline (.xls, .xlsx, .csv, .htm, .html)",
                                 type=["xlsx", "xlsm", "xls", "csv", "htm", "html"], key="up_bl")
-        proyecto = st.text_input("Nombre del proyecto", "MODERNIZACION_2026", key="proy")
-        region_txt = st.text_input("Región", "R4", key="reg")
-        st.caption("Los archivos no se guardan en ningún lado; solo se procesan en esta sesión.")
-    else:
+        proyecto = st.text_input("Nombre del proyecto", proyecto, key="proy")
+        region_txt = st.text_input("Región", region_txt, key="reg")
+        if not _hay_pub:
+            st.caption("Los archivos no se guardan en ningún lado; solo se procesan en esta "
+                       "sesión, salvo que los publiques.")
+    elif not modo_arch and _mostrar_carg:
         archivo = st.file_uploader("Sube el control (.xlsx)", type=["xlsx", "xlsm"])
-        st.caption("Se lee la pestaña **Resumen** y se recalcula desde **Sitios**. El archivo "
-                   "no se guarda en ningún lado.")
+        st.caption("Se lee la pestaña **Resumen** y se recalcula desde **Sitios**.")
 
 with st.sidebar:
     st.header("⚙️ Criterio de RFIC-OK")
@@ -1353,8 +1557,13 @@ df_excel = sin_terr = det = calidad = error_recalc = None
 diferencias = []
 
 if modo_arch:
+    _subidos = {"rf": f_rf, "baseline": f_bl}
     sitios = list(leer_lista(f_sitios.getvalue(), f_sitios.name)) if f_sitios else []
     sitios = limpiar_sitios(sitios + txt_sitios.splitlines())
+    if not sitios and pub_archivo("sitios") is not None:
+        sitios = limpiar_sitios(_decodificar_pub(pub_archivo("sitios").getvalue()).splitlines())
+    f_rf = f_rf or pub_archivo("rf")
+    f_bl = f_bl or pub_archivo("baseline")
     if not (f_rf and f_bl and sitios):
         faltan = [n for n, ok in (("la lista de sitios", bool(sitios)), ("el export de RF", bool(f_rf)),
                                   ("el export de baseline", bool(f_bl))) if not ok]
@@ -1388,15 +1597,25 @@ if modo_arch:
     except Exception as e:  # noqa: BLE001
         st.error(f"No se pudo procesar: {e}")
         st.stop()
+    if ES_ADMIN:
+        _ent = {k: (v.name, v.getvalue()) for k, v in _subidos.items() if v is not None}
+        if f_sitios is not None or txt_sitios.strip() or not _hay_pub:
+            _ent["sitios"] = ("sitios.txt", "\n".join(sitios).encode("utf-8"))
+        bloque_publicar(_ent, {"modo": "archivos", "proyecto": proyecto, "region": region_txt})
     total_col = proyecto.strip() or "Proyecto"
     info = {"region": region_txt.strip() or "—", "total_col": total_col, "ref_encabezado": None}
     terr_excel = [c for c in df_recalc.columns if c != "Total"]
     fuente = FUENTE_RECALC
     origen = "lista de sitios + RF + baseline"
 else:
+    _archivo_subido = archivo
+    archivo = archivo or pub_archivo("control")
     if archivo is None:
         st.info("Sube el archivo de control en la barra lateral para ver el resumen.")
         st.stop()
+    if ES_ADMIN:
+        bloque_publicar({"control": (archivo.name, archivo.getvalue())} if _archivo_subido is not None
+                        else {}, {"modo": "excel"})
     try:
         df_excel, df_recalc, sin_terr, det, terr_excel, total_col, info, error_recalc = cargar(archivo.getvalue(), criterio_rfic)
     except Exception as e:  # noqa: BLE001
