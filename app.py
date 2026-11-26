@@ -834,6 +834,9 @@ def obtener_lista(ver, terr_sel, modo):
         titulo_lista = ver
     elif ver.startswith(PREFIJO_PRES):
         clave_p = ver[len(PREFIJO_PRES):]
+        inc = st.session_state.get("_pres_incluir")
+        if inc and "Caja presentación" in d.columns:
+            d = d[d["Caja presentación"].isin(inc)]
         if clave_p in ("RFIC OK", "RFIC NOK"):
             d = d[d["Bloque RFIC"] == clave_p]
         elif clave_p != "Meta":
@@ -1515,39 +1518,74 @@ with tab_p:
     if det is None:
         st.info("Esta pestaña necesita el cálculo desde la pestaña Sitios o el modo lista + RF + baseline.")
     else:
-        dp = det[det["Territorio"].isin(sel_terr)].copy()
-        dp["Bloque RFIC"], dp["Caja presentación"] = clasificar_presentacion(dp)
-        det.loc[dp.index, "Bloque RFIC"] = dp["Bloque RFIC"]
-        det.loc[dp.index, "Caja presentación"] = dp["Caja presentación"]
-        n_meta = len(dp)
-        n_ok = int((dp["Bloque RFIC"] == "RFIC OK").sum())
-        cuenta = dp["Caja presentación"].value_counts()
+        dall = det[det["Territorio"].isin(sel_terr)].copy()
+        dall["Bloque RFIC"], dall["Caja presentación"] = clasificar_presentacion(dall)
+        det.loc[dall.index, "Bloque RFIC"] = dall["Bloque RFIC"]
+        det.loc[dall.index, "Caja presentación"] = dall["Caja presentación"]
         cajas_ok = ["Integrados", "En instalación", "Pendiente de instalar"]
         cajas_nok = ["Construcción TSS", "En validación TSS", "Aval Cosite", "Transmisión"]
-        extras_nok = [c for c in ("Obra civil", "Carga negada", "Otros") if cuenta.get(c, 0) > 0]
-        hijos_ok = [(c, int(cuenta.get(c, 0))) for c in cajas_ok]
-        hijos_nok = [(c, int(cuenta.get(c, 0))) for c in cajas_nok + extras_nok]
+        extras = ["Obra civil", "Carga negada", "Otros"]
+        cuenta_all = dall["Caja presentación"].value_counts()
+
+        # Región (siempre visible: es un control de datos, no de edición)
+        reg_opciones = ["Todas"] + list(sel_terr)
+        if st.session_state.get("pres_region") not in reg_opciones:
+            st.session_state["pres_region"] = "Todas"
+        region_p = st.radio("Región", reg_opciones, horizontal=True, key="pres_region")
 
         if not presentacion:
             ct1, ct2 = st.columns(2)
-            titulo_p = ct1.text_input("Título", "MODERNIZACIÓN R4 - 4Q", key="pres_titulo")
-            meta_p = ct2.text_input("Etiqueta de la meta", "Meta 4Q", key="pres_meta")
+            ct1.text_input("Título", "MODERNIZACIÓN R4 - 4Q", key="pres_titulo")
+            ct2.text_input("Etiqueta de la meta", "Meta 4Q", key="pres_meta")
+            st.multiselect(
+                "Cajas adicionales dentro de la meta", extras,
+                default=[e for e in extras if cuenta_all.get(e, 0) > 0], key="pres_extras",
+                format_func=lambda e: f"{e} ({int(cuenta_all.get(e, 0))})",
+                help="La meta es la suma de RFIC OK + RFIC NOK. Quita aquí las cajas que no "
+                     "deban contarse (por ejemplo Carga negada u Otros).")
+            # Se copian a claves propias: los widgets ocultos pierden su valor en modo presentación
+            st.session_state["_pres_titulo_v"] = st.session_state.get("pres_titulo", "MODERNIZACIÓN R4 - 4Q")
+            st.session_state["_pres_meta_v"] = st.session_state.get("pres_meta", "Meta 4Q")
+            st.session_state["_pres_extras_v"] = list(st.session_state.get(
+                "pres_extras", [e for e in extras if cuenta_all.get(e, 0) > 0]))
+        titulo_p = st.session_state.get("_pres_titulo_v", "MODERNIZACIÓN R4 - 4Q")
+        meta_p = st.session_state.get("_pres_meta_v", "Meta 4Q")
+        extras_sel = st.session_state.get(
+            "_pres_extras_v", [e for e in extras if cuenta_all.get(e, 0) > 0])
+        incluidas = cajas_ok + cajas_nok + [e for e in extras if e in extras_sel]
+        st.session_state["_pres_incluir"] = incluidas
+
+        dreg = dall if region_p == "Todas" else dall[dall["Territorio"] == region_p]
+        dp = dreg[dreg["Caja presentación"].isin(incluidas)]
+        n_meta = len(dp)
+        n_ok = int((dp["Bloque RFIC"] == "RFIC OK").sum())
+        cuenta = dp["Caja presentación"].value_counts()
+        extras_nok = [c for c in extras if c in extras_sel and cuenta_all.get(c, 0) > 0]
+        hijos_ok = [(c, int(cuenta.get(c, 0))) for c in cajas_ok]
+        hijos_nok = [(c, int(cuenta.get(c, 0))) for c in cajas_nok + extras_nok]
+        titulo_arbol = titulo_p + ("" if region_p == "Todas"
+                                   else f" · {region_p.replace('Bogota ', '').upper()}")
+
+        if n_meta == 0:
+            st.info("No hay sitios para esta selección.")
         else:
-            titulo_p = st.session_state.get("pres_titulo", "MODERNIZACIÓN R4 - 4Q")
-            meta_p = st.session_state.get("pres_meta", "Meta 4Q")
-        fig_t, mapa_nodos = arbol_meta(titulo_p, meta_p, n_meta, n_ok, n_meta - n_ok,
-                                       hijos_ok, hijos_nok)
-        pto = leer_click(grafico_clic(fig_t, "clk_arbol"), "clk_arbol")
-        if pto:
-            clave_n = mapa_nodos.get((round(float(pto.get("x", -1)), 3),
-                                      round(float(pto.get("y", -1)), 3)))
-            if clave_n:
-                ir_a_detalle("t4", PREFIJO_PRES + clave_n, "Todos")
+            fig_t, mapa_nodos = arbol_meta(titulo_arbol, meta_p, n_meta, n_ok, n_meta - n_ok,
+                                           hijos_ok, hijos_nok)
+            pto = leer_click(grafico_clic(fig_t, "clk_arbol"), "clk_arbol")
+            if pto:
+                clave_n = mapa_nodos.get((round(float(pto.get("x", -1)), 3),
+                                          round(float(pto.get("y", -1)), 3)))
+                if clave_n:
+                    ir_a_detalle("t4", PREFIJO_PRES + clave_n, region_p if region_p != "Todas" else "Todos")
+            fuera = len(dreg) - n_meta
+            if fuera > 0:
+                pista(f"La lista tiene {len(dreg):,} sitios; {fuera:,} quedan fuera de la meta "
+                      "por las cajas adicionales desmarcadas.")
         pista("👆 Haz clic en cualquier número para ver los sitios de esa caja.")
         if not presentacion:
             with st.expander("ℹ️ ¿Cómo se clasifica cada caja?"):
                 st.markdown(
-                    f"- **Meta**: sitios de la lista en los territorios elegidos ({n_meta:,}).\n"
+                    f"- **Meta**: suma de RFIC OK + RFIC NOK de la región elegida ({n_meta:,} sitios).\n"
                     f"- **RFIC OK**: cumple el criterio elegido en la barra lateral "
                     f"(*{criterio_rfic}*). Se divide en:\n"
                     "  - **Integrados**: tiene fecha de integración.\n"
