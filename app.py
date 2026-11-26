@@ -1432,6 +1432,14 @@ def preparar_logo(datos: bytes):
                         px[x, y] = (r, g, b_, 0)
                     elif d < tol * 2:  # borde suave
                         px[x, y] = (r, g, b_, int(255 * (d - tol) / tol))
+        alfa = np.array(im.getchannel("A"))
+        if (alfa < 40).mean() < 0.25:  # fondo no liso (degradado, patrón): fundir los bordes
+            hh, ww = alfa.shape
+            fx = np.minimum(np.arange(ww), ww - 1 - np.arange(ww)) / max(0.2 * ww, 1)
+            fy = np.minimum(np.arange(hh), hh - 1 - np.arange(hh)) / max(0.3 * hh, 1)
+            m = np.clip(np.minimum.outer(fy, fx), 0, 1)
+            m = m * m * (3 - 2 * m)  # suavizado
+            im.putalpha(Image.fromarray((alfa * m).astype("uint8")))
         caja = im.getchannel("A").point(lambda v: 255 if v > 20 else 0).getbbox()
         if caja:
             im = im.crop(caja)
@@ -1473,12 +1481,6 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
 
     formas, anot, flechas = [], [], []
 
-    # Resplandor de fondo
-    for cx, cy, rad, col in ((0, 1.0, 38, .16), (100, 0.0, 34, .12), (60, 0.55, 30, .05)):
-        formas.append(dict(type="circle", xref="x", yref="y", layer="below", line_width=0,
-                           x0=cx - rad, x1=cx + rad, y0=(R + 0.7) * cy - rad * R / 70,
-                           y1=(R + 0.7) * cy + rad * R / 70, fillcolor=f"rgba(226,35,26,{col})"))
-
     def codo(x_ini, y_ini, x_bus, x_fin, y_fin, color):
         """Línea con esquinas redondeadas: sale del padre, sube/baja por el bus y entra a la caja."""
         d = f"M {x_ini},{y_ini} "
@@ -1519,13 +1521,18 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
         formas.append(dict(type="rect", layer="below", line_width=0, fillcolor=col,
                            x0=x0 + rx + 0.2, x1=x0 + rx + 0.2 + anc * min(pc, 100) / 100,
                            y0=ya + 0.07, y1=ya + 0.07 + 0.05))
-        anot.append(dict(x=x0 + 1.4, y=y + 0.07, text=f"<b>{n:,}</b>", showarrow=False,
-                         font=dict(size=tam, color="#ffffff"), xanchor="left", yanchor="middle"))
-        anot.append(dict(x=x0 + 1.4, y=y - 0.22, text=f"<b>{etq}</b>", showarrow=False,
-                         font=dict(size=15 * escala, color=col), xanchor="left", yanchor="middle"))
+        h_px = h * px_y
+        anot.append(dict(x=x0 + 1.4, y=y, yshift=0.14 * h_px, text=f"<b>{n:,}</b>", showarrow=False,
+                         font=dict(size=min(tam, 0.36 * h_px), color="#ffffff"),
+                         xanchor="left", yanchor="middle"))
+        anot.append(dict(x=x0 + 1.4, y=y, yshift=-0.2 * h_px, text=f"<b>{etq}</b>", showarrow=False,
+                         font=dict(size=min(15 * escala, 0.19 * h_px), color=col),
+                         xanchor="left", yanchor="middle"))
         if clave != "Meta":
-            anot.append(dict(x=x1 - 1.2, y=y + 0.07, text=f"<b>{pc:.0f}%</b>", showarrow=False,
-                             font=dict(size=21 * escala, color="#ffffff"), xanchor="right", yanchor="middle"))
+            anot.append(dict(x=x1 - 1.2, y=y, yshift=0.14 * h_px, text=f"<b>{pc:.0f}%</b>",
+                             showarrow=False, font=dict(size=min(21 * escala, 0.3 * h_px),
+                                                        color="#ffffff"),
+                             xanchor="right", yanchor="middle"))
         for fx in (x0 + 0.2 * (x1 - x0), (x0 + x1) / 2, x0 + 0.8 * (x1 - x0)):
             xs_clic.append(fx); ys_clic.append(y); claves_clic.append(clave)
             textos.append(f"<b>{etq}</b><br>{n:,} sitios · {pc:.0f}% de la meta")
