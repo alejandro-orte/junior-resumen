@@ -1391,72 +1391,124 @@ def clasificar_presentacion(d):
     return pd.Series(np.where(rfic, "RFIC OK", "RFIC NOK"), index=d.index), caja
 
 
+COLOR_CAJA = {
+    "Meta": "#e2231a", "RFIC OK": "#1baf7a", "RFIC NOK": "#ff5a4d",
+    "Integrados": "#1baf7a", "En instalación": "#4f9cf0", "Pendiente de instalar": "#9b7bea",
+    "Construcción TSS": "#f2b01e", "En validación TSS": "#f58a3c", "Aval Cosite": "#2fc3e8",
+    "Transmisión": "#e86ad0", "Obra civil": "#c9a46a", "Carga negada": "#d6453d",
+    "Otros": "#8a8984",
+}
+
+
+def _rgba(hex_, a):
+    h = hex_.lstrip("#")
+    return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{a})"
+
+
 def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_nok):
-    """Árbol Meta → RFIC OK / RFIC NOK → cajas, con nodos clicables. Devuelve (fig, nodos)."""
+    """Árbol Meta → RFIC OK / RFIC NOK → cajas, con tarjetas clicables. Devuelve (fig, nodos)."""
     R = len(hijos_ok) + len(hijos_nok) + 1
     ys_ok = [R - i for i in range(len(hijos_ok))]
     ys_nok = [R - len(hijos_ok) - 1 - j for j in range(len(hijos_nok))]
-    y_ok = sum(ys_ok) / len(ys_ok)
-    y_nok = sum(ys_nok) / len(ys_nok)
+    y_ok, y_nok = sum(ys_ok) / len(ys_ok), sum(ys_nok) / len(ys_nok)
     y_meta = (y_ok + y_nok) / 2
-    X_META, X_BUS1, X_PAD, X_BUS2, X_HIJO = 7, 17, 27, 56, 77
-    nodos = [("Meta", etiqueta_meta, n_meta, X_META, y_meta, 46),
-             ("RFIC OK", "RFIC OK", n_ok, X_PAD, y_ok, 40),
-             ("RFIC NOK", "RFIC NOK", n_nok, X_PAD, y_nok, 40)]
-    nodos += [(nm, nm, n, X_HIJO, y, 30) for (nm, n), y in zip(hijos_ok, ys_ok)]
-    nodos += [(nm, nm, n, X_HIJO, y, 30) for (nm, n), y in zip(hijos_nok, ys_nok)]
+    alto = max(580, 78 * (R + 1) + 110)
+    px_y = alto / (R + 0.7)               # píxeles por unidad vertical (aprox.)
+    rx, ry = 10 * 100 / 1100, 10 / px_y   # esquinas de ~10 px
+    h = 0.84                              # alto de cada tarjeta (unidades y)
 
-    blanco, rojo = "#ffffff", ROJO_CLARO
-    fig = go.Figure()
-    lineas, flechas = [], []
+    # (clave, etiqueta, n, x0, x1, y, tamaño del número)
+    META = (2, 21)
+    PAD = (31, 50)
+    HIJO = (67, 98)
+    nodos = [("Meta", etiqueta_meta, n_meta, *META, y_meta, 34),
+             ("RFIC OK", "RFIC OK", n_ok, *PAD, y_ok, 30),
+             ("RFIC NOK", "RFIC NOK", n_nok, *PAD, y_nok, 30)]
+    nodos += [(nm, nm, n, *HIJO, y, 26) for (nm, n), y in zip(hijos_ok, ys_ok)]
+    nodos += [(nm, nm, n, *HIJO, y, 26) for (nm, n), y in zip(hijos_nok, ys_nok)]
 
-    def linea(x0, y0, x1, y1):
-        lineas.append(dict(type="line", x0=x0, y0=y0, x1=x1, y1=y1,
-                           line=dict(color=blanco, width=2.5)))
+    formas, anot, flechas = [], [], []
 
-    # Meta -> padres
-    linea(X_META + 6, y_meta, X_BUS1, y_meta)
-    linea(X_BUS1, y_nok, X_BUS1, y_ok)
-    for yp in (y_ok, y_nok):
-        linea(X_BUS1, yp, X_PAD - 7, yp)
-        flechas.append((X_PAD - 7, yp))
-    # Padres -> hijos
-    for yp, ys in ((y_ok, ys_ok), (y_nok, ys_nok)):
-        linea(X_PAD + 7, yp, X_BUS2, yp)
-        linea(X_BUS2, min(ys), X_BUS2, max(ys))
+    # Resplandor de fondo
+    for cx, cy, rad, col in ((0, 1.0, 38, .16), (100, 0.0, 34, .12), (60, 0.55, 30, .05)):
+        formas.append(dict(type="circle", xref="x", yref="y", layer="below", line_width=0,
+                           x0=cx - rad, x1=cx + rad, y0=(R + 0.7) * cy - rad * R / 70,
+                           y1=(R + 0.7) * cy + rad * R / 70, fillcolor=f"rgba(226,35,26,{col})"))
+
+    def codo(x_ini, y_ini, x_bus, x_fin, y_fin, color):
+        """Línea con esquinas redondeadas: sale del padre, sube/baja por el bus y entra a la caja."""
+        d = f"M {x_ini},{y_ini} "
+        if abs(y_fin - y_ini) < 1e-6:
+            d += f"L {x_fin},{y_fin}"
+        else:
+            sg = 1 if y_fin > y_ini else -1
+            d += (f"L {x_bus - rx},{y_ini} Q {x_bus},{y_ini} {x_bus},{y_ini + sg * ry} "
+                  f"L {x_bus},{y_fin - sg * ry} Q {x_bus},{y_fin} {x_bus + rx},{y_fin} "
+                  f"L {x_fin},{y_fin}")
+        formas.append(dict(type="path", path=d, layer="below",
+                           line=dict(color=_rgba(color, .85), width=2.6), fillcolor="rgba(0,0,0,0)"))
+        flechas.append((x_fin, y_fin, color))
+
+    # Conectores
+    for clave, yp in (("RFIC OK", y_ok), ("RFIC NOK", y_nok)):
+        codo(META[1], y_meta, 26, PAD[0] - 0.4, yp, COLOR_CAJA[clave])
+    for clave, yp, ys in (("RFIC OK", y_ok, ys_ok), ("RFIC NOK", y_nok, ys_nok)):
         for yh in ys:
-            linea(X_BUS2, yh, X_HIJO - 9, yh)
-            flechas.append((X_HIJO - 9, yh))
-    fig.update_layout(shapes=lineas)
-    fig.add_trace(go.Scatter(x=[f[0] for f in flechas], y=[f[1] for f in flechas],
-                             mode="markers", hoverinfo="skip", showlegend=False,
-                             marker=dict(symbol="triangle-right", size=11, color=blanco)))
+            codo(PAD[1], yp, 58.5, HIJO[0] - 0.4, yh, COLOR_CAJA[clave])
 
-    anot = []
-    for clave, etq, n, x, y, tam in nodos:
-        pc = pct(n, n_meta) if clave != "Meta" else 100
-        anot.append(dict(x=x, y=y + 0.04, text=f"<b>{n:,}</b>", showarrow=False,
-                         font=dict(size=tam, color=blanco), xanchor="center", yanchor="bottom"))
-        sub = etq + (f"<br>{pc:.0f}%" if clave != "Meta" else "")
-        anot.append(dict(x=x, y=y - 0.02, text=f"<b>{sub}</b>", showarrow=False,
-                         font=dict(size=13, color=rojo), xanchor="center", yanchor="top"))
-    anot.append(dict(xref="paper", yref="paper", x=0.5, y=1.0, text=f"<b>{titulo_txt}</b>",
-                     showarrow=False, font=dict(size=26, color=blanco), bgcolor="#e2231a",
-                     bordercolor=blanco, borderwidth=2, borderpad=10, yanchor="bottom"))
+    # Tarjetas
+    xs_clic, ys_clic, claves_clic, textos = [], [], [], []
+    for clave, etq, n, x0, x1, y, tam in nodos:
+        col = COLOR_CAJA.get(clave, GRIS)
+        ya, yb = y - h / 2, y + h / 2
+        formas.append(dict(
+            type="path", layer="below",
+            path=(f"M {x0 + rx},{ya} L {x1 - rx},{ya} Q {x1},{ya} {x1},{ya + ry} "
+                  f"L {x1},{yb - ry} Q {x1},{yb} {x1 - rx},{yb} L {x0 + rx},{yb} "
+                  f"Q {x0},{yb} {x0},{yb - ry} L {x0},{ya + ry} Q {x0},{ya} {x0 + rx},{ya} Z"),
+            fillcolor=_rgba(col, .16), line=dict(color=col, width=2)))
+        pc = 100.0 if clave == "Meta" else pct(n, n_meta)
+        # barra de avance (sobre la meta)
+        anc = (x1 - x0) - 2 * rx - 0.4
+        formas.append(dict(type="rect", layer="below", line_width=0, fillcolor="rgba(255,255,255,.14)",
+                           x0=x0 + rx + 0.2, x1=x0 + rx + 0.2 + anc, y0=ya + 0.07, y1=ya + 0.07 + 0.05))
+        formas.append(dict(type="rect", layer="below", line_width=0, fillcolor=col,
+                           x0=x0 + rx + 0.2, x1=x0 + rx + 0.2 + anc * min(pc, 100) / 100,
+                           y0=ya + 0.07, y1=ya + 0.07 + 0.05))
+        anot.append(dict(x=x0 + 1.4, y=y + 0.07, text=f"<b>{n:,}</b>", showarrow=False,
+                         font=dict(size=tam, color="#ffffff"), xanchor="left", yanchor="middle"))
+        anot.append(dict(x=x0 + 1.4, y=y - 0.22, text=f"<b>{etq}</b>", showarrow=False,
+                         font=dict(size=13, color=col), xanchor="left", yanchor="middle"))
+        if clave != "Meta":
+            anot.append(dict(x=x1 - 1.2, y=y + 0.07, text=f"<b>{pc:.0f}%</b>", showarrow=False,
+                             font=dict(size=17, color="#ffffff"), xanchor="right", yanchor="middle"))
+        for fx in (x0 + 0.2 * (x1 - x0), (x0 + x1) / 2, x0 + 0.8 * (x1 - x0)):
+            xs_clic.append(fx); ys_clic.append(y); claves_clic.append(clave)
+            textos.append(f"<b>{etq}</b><br>{n:,} sitios · {pc:.0f}% de la meta")
+
+    # Puntas de flecha
+    fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=[nd[3] for nd in nodos], y=[nd[4] for nd in nodos], mode="markers",
-        marker=dict(size=64, color="rgba(255,255,255,0.01)"),
+        x=[f[0] for f in flechas], y=[f[1] for f in flechas], mode="markers",
+        hoverinfo="skip", showlegend=False,
+        marker=dict(symbol="triangle-right", size=10, color=[f[2] for f in flechas])))
+    fig.add_trace(go.Scatter(
+        x=xs_clic, y=ys_clic, mode="markers", showlegend=False, customdata=claves_clic,
+        marker=dict(symbol="square", size=58, color="rgba(255,255,255,0.01)"),
         unselected=dict(marker=dict(opacity=0.01)), selected=dict(marker=dict(opacity=0.01)),
-        customdata=[nd[0] for nd in nodos], showlegend=False,
-        text=[f"<b>{nd[1]}</b><br>{nd[2]:,} sitios" for nd in nodos],
-        hovertemplate="%{text}<br>Clic para ver los sitios<extra></extra>"))
+        text=textos, hovertemplate="%{text}<br><i>Clic para ver los sitios</i><extra></extra>"))
+
+    anot.append(dict(xref="paper", yref="paper", x=0.5, y=1.0, text=f"<b>{titulo_txt}</b>",
+                     showarrow=False, font=dict(size=26, color="#ffffff"), bgcolor="#e2231a",
+                     bordercolor="#ffffff", borderwidth=2, borderpad=10, yanchor="bottom"))
     fig.update_layout(
-        annotations=anot, height=max(560, 74 * (R + 1) + 90), clickmode="event+select",
-        dragmode=False, paper_bgcolor="#120708", plot_bgcolor="#120708",
-        margin=dict(l=10, r=10, t=70, b=10), showlegend=False,
+        shapes=formas, annotations=anot, height=alto, clickmode="event+select", dragmode=False,
+        paper_bgcolor="#140a0c", plot_bgcolor="#140a0c", margin=dict(l=10, r=10, t=78, b=10),
+        showlegend=False, hoverlabel=dict(bgcolor="#2a1a1d", font_size=13, font_color="#ffffff"),
         xaxis=dict(visible=False, range=[0, 100], fixedrange=True),
-        yaxis=dict(visible=False, range=[0.2, R + 0.9], fixedrange=True))
-    return fig, {(round(nd[3], 3), round(nd[4], 3)): nd[0] for nd in nodos}
+        yaxis=dict(visible=False, range=[0.15, R + 0.85], fixedrange=True))
+    mapa = {(round(x, 3), round(y, 3)): k for x, y, k in zip(xs_clic, ys_clic, claves_clic)}
+    return fig, mapa
 
 
 with tab_p:
