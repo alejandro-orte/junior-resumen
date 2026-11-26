@@ -13,6 +13,7 @@ import datetime
 import io
 import unicodedata
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -185,6 +186,8 @@ COLOR_CARGA = {"Viable": "#1baf7a", "Pendiente": "#eda100", "Cosite": "#5598e7",
                "Negado": "#d6453d", "Con fecha": "#8e6bd6", "Sin dato": "#c3c2b7"}
 PRIORIDAD_CARGA = ["Negado", "Cosite", "Pendiente", "Viable"]  # si un sitio tiene varios
 PREFIJO_CARGA = "Carga · "
+PREFIJO_PRES = "Presentación · "
+ROJO_CLARO = "#ff4b3e"
 
 
 def estado_carga(x) -> str:
@@ -829,6 +832,13 @@ def obtener_lista(ver, terr_sel, modo):
     elif ver.startswith(PREFIJO_CARGA):
         d = d[d["Estado carga"] == ver[len(PREFIJO_CARGA):]]
         titulo_lista = ver
+    elif ver.startswith(PREFIJO_PRES):
+        clave_p = ver[len(PREFIJO_PRES):]
+        if clave_p in ("RFIC OK", "RFIC NOK"):
+            d = d[d["Bloque RFIC"] == clave_p]
+        elif clave_p != "Meta":
+            d = d[d["Caja presentación"] == clave_p]
+        titulo_lista = ver
     else:
         clave = _norm(ver)
         if "ok_" + clave in d.columns:
@@ -961,7 +971,7 @@ def panel_detalle(prefijo):
         c1, c2, c3 = st.columns([3, 2, 2])
         ver = c1.selectbox("Ver", opciones_ver, key=f"{prefijo}_ver")
         terr_sel = c2.selectbox("Territorio", opciones_terr, key=f"{prefijo}_terr")
-        es_etapa = ver.startswith((PREFIJO_ETAPA, PREFIJO_CARGA))
+        es_etapa = ver.startswith((PREFIJO_ETAPA, PREFIJO_CARGA, PREFIJO_PRES))
         es_total = _norm(ver) == "TOTAL SITIOS"
         modo = c3.radio("Mostrar", ["Cumplen", "Pendientes"], key=f"{prefijo}_modo",
                         horizontal=True, disabled=es_etapa or es_total,
@@ -1212,12 +1222,12 @@ kpi2(c[5], "Carga con alerta", f"{v(h_neg) + v(h_cos):,}", "", "#d6453d",
 st.write("")
 
 _n5 = (int(len(calidad["sin_trabajos"]) + len(sin_terr)) if modo_arch else len(diferencias))
-_nombres = ["📊 Resumen", "🗺️ Territorios", "📦 Carga", "📋 Tabla"]
+_nombres = ["📊 Resumen", "🎞️ Presentación", "🗺️ Territorios", "📦 Carga", "📋 Tabla"]
 if not presentacion:
     _nombres.append(f"🔎 Calidad de datos ({_n5})" if modo_arch else f"🔧 Correcciones ({_n5})")
 _tabs = st.tabs(_nombres)
-tab1, tab2, tab_c, tab4 = _tabs[:4]
-tab5 = _tabs[4] if len(_tabs) > 4 else None
+tab1, tab_p, tab2, tab_c, tab4 = _tabs[:5]
+tab5 = _tabs[5] if len(_tabs) > 5 else None
 
 hitos_embudo = [buscar(df, h) for h in ORDEN_EMBUDO]
 hitos_embudo = [h for h in hitos_embudo if h is not None]
@@ -1357,6 +1367,148 @@ with tab1:
                 for nm, n, c in etapas)
             st.markdown(f'<div class="chips">{chips}</div>', unsafe_allow_html=True)
 
+
+# ---- Tab Presentación (árbol de la meta) -----------------------------------
+def clasificar_presentacion(d):
+    """Devuelve (Bloque RFIC, Caja) por sitio para el árbol de la pestaña Presentación."""
+    def g(c):
+        return d[c].astype(bool) if c in d.columns else pd.Series(False, index=d.index)
+    rfic, inst, integ = g("ok_RFIC-OK"), g("ok_INSTALADOS"), g("ok_INTEGRADOS")
+    tss_c, tss_a, cw, tx = (g("ok_TSS CARGADOS"), g("ok_TSS APROBADOS"),
+                            g("ok_OBRA CIVIL OK"), g("ok_DISEÑO TX"))
+    est = d["Estado carga"] if "Estado carga" in d.columns else pd.Series("", index=d.index)
+    caja = pd.Series("Otros", index=d.index)
+    caja[rfic & ~inst & ~integ] = "Pendiente de instalar"
+    caja[rfic & inst & ~integ] = "En instalación"
+    caja[rfic & integ] = "Integrados"
+    nok = ~rfic
+    caja[nok & tss_a & cw & ~tx] = "Transmisión"
+    caja[nok & tss_a & ~cw] = "Obra civil"
+    caja[nok & tss_c & ~tss_a] = "En validación TSS"
+    caja[nok & ~tss_c] = "Construcción TSS"
+    caja[nok & (est == "Negado")] = "Carga negada"
+    caja[nok & (est == "Cosite")] = "Aval Cosite"
+    return pd.Series(np.where(rfic, "RFIC OK", "RFIC NOK"), index=d.index), caja
+
+
+def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_nok):
+    """Árbol Meta → RFIC OK / RFIC NOK → cajas, con nodos clicables. Devuelve (fig, nodos)."""
+    R = len(hijos_ok) + len(hijos_nok) + 1
+    ys_ok = [R - i for i in range(len(hijos_ok))]
+    ys_nok = [R - len(hijos_ok) - 1 - j for j in range(len(hijos_nok))]
+    y_ok = sum(ys_ok) / len(ys_ok)
+    y_nok = sum(ys_nok) / len(ys_nok)
+    y_meta = (y_ok + y_nok) / 2
+    X_META, X_BUS1, X_PAD, X_BUS2, X_HIJO = 7, 17, 27, 56, 77
+    nodos = [("Meta", etiqueta_meta, n_meta, X_META, y_meta, 46),
+             ("RFIC OK", "RFIC OK", n_ok, X_PAD, y_ok, 40),
+             ("RFIC NOK", "RFIC NOK", n_nok, X_PAD, y_nok, 40)]
+    nodos += [(nm, nm, n, X_HIJO, y, 30) for (nm, n), y in zip(hijos_ok, ys_ok)]
+    nodos += [(nm, nm, n, X_HIJO, y, 30) for (nm, n), y in zip(hijos_nok, ys_nok)]
+
+    blanco, rojo = "#ffffff", ROJO_CLARO
+    fig = go.Figure()
+    lineas, flechas = [], []
+
+    def linea(x0, y0, x1, y1):
+        lineas.append(dict(type="line", x0=x0, y0=y0, x1=x1, y1=y1,
+                           line=dict(color=blanco, width=2.5)))
+
+    # Meta -> padres
+    linea(X_META + 6, y_meta, X_BUS1, y_meta)
+    linea(X_BUS1, y_nok, X_BUS1, y_ok)
+    for yp in (y_ok, y_nok):
+        linea(X_BUS1, yp, X_PAD - 7, yp)
+        flechas.append((X_PAD - 7, yp))
+    # Padres -> hijos
+    for yp, ys in ((y_ok, ys_ok), (y_nok, ys_nok)):
+        linea(X_PAD + 7, yp, X_BUS2, yp)
+        linea(X_BUS2, min(ys), X_BUS2, max(ys))
+        for yh in ys:
+            linea(X_BUS2, yh, X_HIJO - 9, yh)
+            flechas.append((X_HIJO - 9, yh))
+    fig.update_layout(shapes=lineas)
+    fig.add_trace(go.Scatter(x=[f[0] for f in flechas], y=[f[1] for f in flechas],
+                             mode="markers", hoverinfo="skip", showlegend=False,
+                             marker=dict(symbol="triangle-right", size=11, color=blanco)))
+
+    anot = []
+    for clave, etq, n, x, y, tam in nodos:
+        pc = pct(n, n_meta) if clave != "Meta" else 100
+        anot.append(dict(x=x, y=y + 0.04, text=f"<b>{n:,}</b>", showarrow=False,
+                         font=dict(size=tam, color=blanco), xanchor="center", yanchor="bottom"))
+        sub = etq + (f"<br>{pc:.0f}%" if clave != "Meta" else "")
+        anot.append(dict(x=x, y=y - 0.02, text=f"<b>{sub}</b>", showarrow=False,
+                         font=dict(size=13, color=rojo), xanchor="center", yanchor="top"))
+    anot.append(dict(xref="paper", yref="paper", x=0.5, y=1.0, text=f"<b>{titulo_txt}</b>",
+                     showarrow=False, font=dict(size=26, color=blanco), bgcolor="#e2231a",
+                     bordercolor=blanco, borderwidth=2, borderpad=10, yanchor="bottom"))
+    fig.add_trace(go.Scatter(
+        x=[nd[3] for nd in nodos], y=[nd[4] for nd in nodos], mode="markers",
+        marker=dict(size=64, color="rgba(255,255,255,0.01)"),
+        unselected=dict(marker=dict(opacity=0.01)), selected=dict(marker=dict(opacity=0.01)),
+        customdata=[nd[0] for nd in nodos], showlegend=False,
+        text=[f"<b>{nd[1]}</b><br>{nd[2]:,} sitios" for nd in nodos],
+        hovertemplate="%{text}<br>Clic para ver los sitios<extra></extra>"))
+    fig.update_layout(
+        annotations=anot, height=max(560, 74 * (R + 1) + 90), clickmode="event+select",
+        dragmode=False, paper_bgcolor="#120708", plot_bgcolor="#120708",
+        margin=dict(l=10, r=10, t=70, b=10), showlegend=False,
+        xaxis=dict(visible=False, range=[0, 100], fixedrange=True),
+        yaxis=dict(visible=False, range=[0.2, R + 0.9], fixedrange=True))
+    return fig, {(round(nd[3], 3), round(nd[4], 3)): nd[0] for nd in nodos}
+
+
+with tab_p:
+    if det is None:
+        st.info("Esta pestaña necesita el cálculo desde la pestaña Sitios o el modo lista + RF + baseline.")
+    else:
+        dp = det[det["Territorio"].isin(sel_terr)].copy()
+        dp["Bloque RFIC"], dp["Caja presentación"] = clasificar_presentacion(dp)
+        det.loc[dp.index, "Bloque RFIC"] = dp["Bloque RFIC"]
+        det.loc[dp.index, "Caja presentación"] = dp["Caja presentación"]
+        n_meta = len(dp)
+        n_ok = int((dp["Bloque RFIC"] == "RFIC OK").sum())
+        cuenta = dp["Caja presentación"].value_counts()
+        cajas_ok = ["Integrados", "En instalación", "Pendiente de instalar"]
+        cajas_nok = ["Construcción TSS", "En validación TSS", "Aval Cosite", "Transmisión"]
+        extras_nok = [c for c in ("Obra civil", "Carga negada", "Otros") if cuenta.get(c, 0) > 0]
+        hijos_ok = [(c, int(cuenta.get(c, 0))) for c in cajas_ok]
+        hijos_nok = [(c, int(cuenta.get(c, 0))) for c in cajas_nok + extras_nok]
+
+        if not presentacion:
+            ct1, ct2 = st.columns(2)
+            titulo_p = ct1.text_input("Título", "MODERNIZACIÓN R4 - 4Q", key="pres_titulo")
+            meta_p = ct2.text_input("Etiqueta de la meta", "Meta 4Q", key="pres_meta")
+        else:
+            titulo_p = st.session_state.get("pres_titulo", "MODERNIZACIÓN R4 - 4Q")
+            meta_p = st.session_state.get("pres_meta", "Meta 4Q")
+        fig_t, mapa_nodos = arbol_meta(titulo_p, meta_p, n_meta, n_ok, n_meta - n_ok,
+                                       hijos_ok, hijos_nok)
+        pto = leer_click(grafico_clic(fig_t, "clk_arbol"), "clk_arbol")
+        if pto:
+            clave_n = mapa_nodos.get((round(float(pto.get("x", -1)), 3),
+                                      round(float(pto.get("y", -1)), 3)))
+            if clave_n:
+                ir_a_detalle("t4", PREFIJO_PRES + clave_n, "Todos")
+        pista("👆 Haz clic en cualquier número para ver los sitios de esa caja.")
+        if not presentacion:
+            with st.expander("ℹ️ ¿Cómo se clasifica cada caja?"):
+                st.markdown(
+                    f"- **Meta**: sitios de la lista en los territorios elegidos ({n_meta:,}).\n"
+                    f"- **RFIC OK**: cumple el criterio elegido en la barra lateral "
+                    f"(*{criterio_rfic}*). Se divide en:\n"
+                    "  - **Integrados**: tiene fecha de integración.\n"
+                    "  - **En instalación**: tiene fecha de instalación pero no de integración.\n"
+                    "  - **Pendiente de instalar**: RFIC OK sin fecha de instalación. Aquí irán "
+                    "*Hardware* y *Acceso / MOS* cuando haya datos de HW completo y MOS.\n"
+                    "- **RFIC NOK** (el resto), con este orden de prioridad:\n"
+                    "  - **Aval Cosite**: la carga está en Cosite.\n"
+                    "  - **Construcción TSS**: sin TSS cargado.\n"
+                    "  - **En validación TSS**: TSS cargado pero sin aprobar.\n"
+                    "  - **Transmisión**: TSS ok y CW Lista, sin Orden Tx.\n"
+                    "  - Cajas extra que solo aparecen si tienen sitios: **Obra civil** (TSS ok sin "
+                    "CW Lista), **Carga negada** y **Otros**.")
 
 # ---- Tab 2: Por territorio -------------------------------------------------
 with tab2:
