@@ -1458,39 +1458,35 @@ def fondo_oscuro(ancho: int, alto: int) -> str:
 
 
 def preparar_logo(datos: bytes):
-    """Deja el logo listo para ponerlo sobre fondo oscuro: recorta márgenes y vuelve
-    transparente un fondo liso (blanco o negro) si lo tiene. Devuelve (uri, proporción)."""
+    """Deja el logo listo para ponerlo sobre el fondo oscuro: quita el fondo liso o oscuro,
+    recorta los márgenes vacíos y lo devuelve (uri, proporción ancho/alto)."""
     try:
         from PIL import Image
         im = Image.open(io.BytesIO(datos)).convert("RGBA")
-        px = im.load()
-        w, h = im.size
-        con_alfa = any(px[x, y][3] < 200 for x in range(0, w, max(w // 20, 1))
-                       for y in range(0, h, max(h // 20, 1)))
-        if not con_alfa:
-            esq = [px[0, 0], px[w - 1, 0], px[0, h - 1], px[w - 1, h - 1]]
-            bg = tuple(sum(c[i] for c in esq) // 4 for i in range(3))
-            tol = 60
-            for y in range(h):
-                for x in range(w):
-                    r, g, b_, a_ = px[x, y]
-                    d = abs(r - bg[0]) + abs(g - bg[1]) + abs(b_ - bg[2])
-                    if d < tol:
-                        px[x, y] = (r, g, b_, 0)
-                    elif d < tol * 2:  # borde suave
-                        px[x, y] = (r, g, b_, int(255 * (d - tol) / tol))
-        alfa = np.array(im.getchannel("A"))
-        if (alfa < 40).mean() < 0.25:  # fondo no liso (degradado, patrón): fundir los bordes
-            hh, ww = alfa.shape
-            fx = np.minimum(np.arange(ww), ww - 1 - np.arange(ww)) / max(0.2 * ww, 1)
-            fy = np.minimum(np.arange(hh), hh - 1 - np.arange(hh)) / max(0.3 * hh, 1)
-            m = np.clip(np.minimum.outer(fy, fx), 0, 1)
-            m = m * m * (3 - 2 * m)  # suavizado
-            im.putalpha(Image.fromarray((alfa * m).astype("uint8")))
-        caja = im.getchannel("A").point(lambda v: 255 if v > 20 else 0).getbbox()
+        arr = np.array(im).astype("float32")
+        alfa = arr[..., 3]
+        if (alfa < 200).mean() < 0.02:  # sin transparencia real
+            maxc = arr[..., :3].max(axis=2)
+            if np.median(maxc) < 110:
+                # Fondo oscuro (p. ej. un recorte de la diapositiva): lo oscuro se vuelve transparente
+                t = np.clip((maxc - 95) / 70, 0, 1)
+                alfa = alfa * (t * t * (3 - 2 * t))
+            else:
+                # Fondo claro liso: se quita el color de las esquinas
+                h, w = alfa.shape
+                esq = [arr[0, 0, :3], arr[0, w - 1, :3], arr[h - 1, 0, :3], arr[h - 1, w - 1, :3]]
+                bg = np.mean(esq, axis=0)
+                dist = np.abs(arr[..., :3] - bg).sum(axis=2)
+                alfa = alfa * np.clip((dist - 60) / 60, 0, 1)
+            arr[..., 3] = alfa
+        im = Image.fromarray(arr.astype("uint8"), "RGBA")
+        caja = im.getchannel("A").point(lambda v: 255 if v > 40 else 0).getbbox()
         if caja:
-            im = im.crop(caja)
-        if max(im.size) > 900:  # liviano para el navegador
+            x0, y0, x1, y1 = caja
+            px_, py_ = int((x1 - x0) * .06) + 2, int((y1 - y0) * .10) + 2
+            im = im.crop((max(x0 - px_, 0), max(y0 - py_, 0),
+                          min(x1 + px_, im.size[0]), min(y1 + py_, im.size[1])))
+        if max(im.size) > 900:
             im.thumbnail((900, 900))
         buf = io.BytesIO()
         im.save(buf, format="PNG")
@@ -1511,8 +1507,8 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
     y_meta = (y_ok + y_nok) / 2
     con_chips = len(regiones) > 1
     y_top = R + (1.75 if con_chips else 0.85)
-    alto = int(max(600, 80 * (R + 1) + 120 + (60 if con_chips else 0) + (80 if logo_uri else 0)) * escala)
-    px_y = (alto - 90 * escala) / (y_top - (-1.0 if logo_uri else 0.15))               # píxeles por unidad vertical (aprox.)
+    alto = int(max(600, 80 * (R + 1) + 120 + (60 if con_chips else 0) + (150 if logo_uri else 0)) * escala)
+    px_y = (alto - 90 * escala) / (y_top - (-1.75 if logo_uri else 0.15))               # píxeles por unidad vertical (aprox.)
     rx, ry = 10 * escala * 100 / 1400, 10 * escala / px_y   # esquinas de ~10 px
     h = 0.84                              # alto de cada tarjeta (unidades y)
 
@@ -1633,15 +1629,15 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
         paper_bgcolor="#0a0507", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=10, r=10, t=int(84 * escala), b=10),
         showlegend=False, hoverlabel=dict(bgcolor="#2a1a1d", font_size=14, font_color="#ffffff"),
         xaxis=dict(visible=False, range=[0, 100], fixedrange=True),
-        yaxis=dict(visible=False, range=[(-1.0 if logo_uri else 0.15), y_top], fixedrange=True))
+        yaxis=dict(visible=False, range=[(-1.75 if logo_uri else 0.15), y_top], fixedrange=True))
     if logo_uri:
         uri, aspecto = logo_uri
-        alto_u = 0.78                                   # unidades y
-        ancho_u = min(alto_u * px_y * aspecto * 100 / 1400, 30)
+        alto_u = min(112 * escala / px_y, 1.2)               # unidades y (~110 px)
+        ancho_u = min(alto_u * px_y * aspecto * 100 / 1400, 34)
         alto_u = ancho_u * 1400 / 100 / (px_y * aspecto)
         fig.add_layout_image(dict(
-            source=uri, xref="x", yref="y", x=98, y=-0.95, xanchor="right", yanchor="bottom",
-            sizex=ancho_u, sizey=alto_u, sizing="contain", layer="above", opacity=.95))
+            source=uri, xref="x", yref="y", x=98, y=-1.6, xanchor="right", yanchor="bottom",
+            sizex=ancho_u, sizey=alto_u, sizing="contain", layer="above", opacity=1))
     fig.add_layout_image(dict(
         source=fondo_oscuro(1400, alto), xref="paper", yref="paper", x=0, y=1, sizex=1, sizey=1,
         xanchor="left", yanchor="top", sizing="stretch", layer="below"))
