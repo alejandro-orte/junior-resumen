@@ -1410,6 +1410,53 @@ def _rgba(hex_, a):
     return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{a})"
 
 
+@st.cache_data(show_spinner=False)
+def fondo_oscuro(ancho: int, alto: int) -> str:
+    """Fondo negro con resplandor rojo en las esquinas y un patrón sutil de hexágonos."""
+    import math
+
+    from PIL import Image, ImageDraw
+    ancho, alto = int(ancho), int(alto)
+    yy, xx = np.mgrid[0:alto, 0:ancho].astype("float32")
+    m = float(max(ancho, alto))
+
+    def brillo(cx, cy, radio, p=2.2):
+        r = np.sqrt(((xx - cx * ancho) ** 2 + (yy - cy * alto) ** 2)) / (radio * m)
+        return np.clip(1 - r, 0, 1) ** p
+
+    base = np.zeros((alto, ancho, 3), dtype="float32") + np.array([10, 5, 7], dtype="float32")
+    for cx, cy, rad, col in ((0.0, 0.0, 0.62, (120, 14, 18)), (1.0, 1.0, 0.50, (95, 12, 16)),
+                             (0.0, 1.0, 0.40, (45, 8, 10)), (1.0, 0.0, 0.40, (55, 9, 12)),
+                             (0.5, 0.5, 0.75, (28, 7, 9))):
+        base += brillo(cx, cy, rad)[..., None] * np.array(col, dtype="float32")
+    img = Image.fromarray(np.clip(base, 0, 255).astype("uint8"), "RGB").convert("RGBA")
+
+    # Hexágonos: más visibles hacia la derecha, abajo y a la izquierda
+    W = np.maximum(np.maximum(brillo(1.0, 1.0, 0.5, 1.2), brillo(0.0, 0.62, 0.30, 1.4) * 0.7),
+                   brillo(1.0, 0.0, 0.28, 1.4) * 0.6)
+    capa = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(capa)
+    lado = max(34, int(m / 26))
+    dx, dy = lado * math.sqrt(3), lado * 1.5
+    fila = 0
+    y = -lado
+    while y < alto + lado:
+        x = -dx + (dx / 2 if fila % 2 else 0)
+        while x < ancho + dx:
+            peso = float(W[min(max(int(y), 0), alto - 1), min(max(int(x), 0), ancho - 1)])
+            if peso > 0.12:
+                pts = [(x + lado * math.cos(math.radians(60 * k + 30)),
+                        y + lado * math.sin(math.radians(60 * k + 30))) for k in range(6)]
+                d.polygon(pts, outline=(170, 30, 34, int(210 * peso)))
+            x += dx
+        y += dy
+        fila += 1
+    img = Image.alpha_composite(img, capa).convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=86)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
 def preparar_logo(datos: bytes):
     """Deja el logo listo para ponerlo sobre fondo oscuro: recorta márgenes y vuelve
     transparente un fondo liso (blanco o negro) si lo tiene. Devuelve (uri, proporción)."""
@@ -1583,7 +1630,7 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
                      bordercolor="#ffffff", borderwidth=2, borderpad=10, yanchor="bottom"))
     fig.update_layout(
         shapes=formas, annotations=anot, height=alto, clickmode="event+select", dragmode=False,
-        paper_bgcolor="#140a0c", plot_bgcolor="#140a0c", margin=dict(l=10, r=10, t=int(84 * escala), b=10),
+        paper_bgcolor="#0a0507", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=10, r=10, t=int(84 * escala), b=10),
         showlegend=False, hoverlabel=dict(bgcolor="#2a1a1d", font_size=14, font_color="#ffffff"),
         xaxis=dict(visible=False, range=[0, 100], fixedrange=True),
         yaxis=dict(visible=False, range=[(-1.0 if logo_uri else 0.15), y_top], fixedrange=True))
@@ -1595,6 +1642,9 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
         fig.add_layout_image(dict(
             source=uri, xref="x", yref="y", x=98, y=-0.95, xanchor="right", yanchor="bottom",
             sizex=ancho_u, sizey=alto_u, sizing="contain", layer="above", opacity=.95))
+    fig.add_layout_image(dict(
+        source=fondo_oscuro(1400, alto), xref="paper", yref="paper", x=0, y=1, sizex=1, sizey=1,
+        xanchor="left", yanchor="top", sizing="stretch", layer="below"))
     mapa = {(round(x, 3), round(y, 3)): k for x, y, k in zip(xs_clic, ys_clic, claves_clic)}
     return fig, mapa
 
