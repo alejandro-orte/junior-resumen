@@ -1215,10 +1215,10 @@ def pantalla_concepto_tss():
                "sitio y área, y se generan el Excel y la imagen para WhatsApp.")
 
     c1, c2 = st.columns(2)
-    f_rep = c1.file_uploader("1 · Reporte Concepto TSS (.xls, .xlsx, .csv)",
-                             type=["xls", "xlsx", "csv"], key="ct_rep")
-    f_bl = c2.file_uploader("2 · Baseline (para el territorio, opcional)",
-                            type=["xls", "xlsx", "csv"], key="ct_bl",
+    f_rep = c1.file_uploader("1 · Reporte Concepto TSS (.xls, .xlsx, .csv, .htm, .html)",
+                             type=["xls", "xlsx", "csv", "htm", "html"], key="ct_rep")
+    f_bl = c2.file_uploader("2 · Baseline (para el territorio, opcional; .xls, .htm, .html…)",
+                            type=["xls", "xlsx", "csv", "htm", "html"], key="ct_bl",
                             help="Se usa solo para poner el territorio comercial de cada sitio.")
     if not f_rep:
         st.info("Sube el reporte de Concepto TSS para empezar.")
@@ -1309,10 +1309,10 @@ with st.sidebar:
                                     type=["csv", "txt", "xlsx", "xlsm"], key="up_sitios")
         txt_sitios = st.text_area("…o pega los nombres (uno por línea)", height=90,
                                   key="txt_sitios")
-        f_rf = st.file_uploader("2 · Export de RF (.xls, .xlsx, .csv)", type=["xlsx", "xlsm", "xls", "csv"],
+        f_rf = st.file_uploader("2 · Export de RF (.xls, .xlsx, .csv, .htm, .html)", type=["xlsx", "xlsm", "xls", "csv", "htm", "html"],
                                 key="up_rf")
         f_bl = st.file_uploader("3 · Export de baseline (.xls, .xlsx, .csv)",
-                                type=["xlsx", "xlsm", "xls", "csv"], key="up_bl")
+                                type=["xlsx", "xlsm", "xls", "csv", "htm", "html"], key="up_bl")
         proyecto = st.text_input("Nombre del proyecto", "MODERNIZACION_2026", key="proy")
         region_txt = st.text_input("Región", "R4", key="reg")
         st.caption("Los archivos no se guardan en ningún lado; solo se procesan en esta sesión.")
