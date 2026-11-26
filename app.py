@@ -9,8 +9,10 @@ Ejecutar:
     streamlit run app.py
 """
 
+import base64
 import datetime
 import io
+from pathlib import Path
 import unicodedata
 
 import numpy as np
@@ -1042,7 +1044,7 @@ if presentacion:
     st.markdown("<style>[data-testid='stSidebar'],[data-testid='stSidebarCollapsedControl'],"
                 "[data-testid='collapsedControl'],[data-testid='stHeader'],header"
                 "{display:none !important}.block-container{padding-top:1rem;"
-                "max-width:1400px}</style>", unsafe_allow_html=True)
+                "max-width:100%;padding-left:2rem;padding-right:2rem}</style>", unsafe_allow_html=True)
 
 
 def pista(texto):
@@ -1409,7 +1411,7 @@ def _rgba(hex_, a):
 
 
 def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_nok,
-               regiones=(), region_sel="Todas"):
+               regiones=(), region_sel="Todas", escala=1.0, logo_uri=None):
     """Árbol Meta → RFIC OK / RFIC NOK → cajas, con tarjetas clicables. Devuelve (fig, nodos)."""
     R = len(hijos_ok) + len(hijos_nok) + 1
     ys_ok = [R - i for i in range(len(hijos_ok))]
@@ -1418,20 +1420,20 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
     y_meta = (y_ok + y_nok) / 2
     con_chips = len(regiones) > 1
     y_top = R + (1.75 if con_chips else 0.85)
-    alto = max(580, 78 * (R + 1) + 110 + (60 if con_chips else 0))
-    px_y = alto / (y_top - 0.15)               # píxeles por unidad vertical (aprox.)
-    rx, ry = 10 * 100 / 1100, 10 / px_y   # esquinas de ~10 px
+    alto = int(max(600, 80 * (R + 1) + 120 + (60 if con_chips else 0) + (50 if logo_uri else 0)) * escala)
+    px_y = (alto - 90 * escala) / (y_top - 0.15)               # píxeles por unidad vertical (aprox.)
+    rx, ry = 10 * escala * 100 / 1400, 10 * escala / px_y   # esquinas de ~10 px
     h = 0.84                              # alto de cada tarjeta (unidades y)
 
     # (clave, etiqueta, n, x0, x1, y, tamaño del número)
     META = (2, 21)
     PAD = (31, 50)
     HIJO = (67, 98)
-    nodos = [("Meta", etiqueta_meta, n_meta, *META, y_meta, 34),
-             ("RFIC OK", "RFIC OK", n_ok, *PAD, y_ok, 30),
-             ("RFIC NOK", "RFIC NOK", n_nok, *PAD, y_nok, 30)]
-    nodos += [(nm, nm, n, *HIJO, y, 26) for (nm, n), y in zip(hijos_ok, ys_ok)]
-    nodos += [(nm, nm, n, *HIJO, y, 26) for (nm, n), y in zip(hijos_nok, ys_nok)]
+    nodos = [("Meta", etiqueta_meta, n_meta, *META, y_meta, 42 * escala),
+             ("RFIC OK", "RFIC OK", n_ok, *PAD, y_ok, 36 * escala),
+             ("RFIC NOK", "RFIC NOK", n_nok, *PAD, y_nok, 36 * escala)]
+    nodos += [(nm, nm, n, *HIJO, y, 30 * escala) for (nm, n), y in zip(hijos_ok, ys_ok)]
+    nodos += [(nm, nm, n, *HIJO, y, 30 * escala) for (nm, n), y in zip(hijos_nok, ys_nok)]
 
     formas, anot, flechas = [], [], []
 
@@ -1484,10 +1486,10 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
         anot.append(dict(x=x0 + 1.4, y=y + 0.07, text=f"<b>{n:,}</b>", showarrow=False,
                          font=dict(size=tam, color="#ffffff"), xanchor="left", yanchor="middle"))
         anot.append(dict(x=x0 + 1.4, y=y - 0.22, text=f"<b>{etq}</b>", showarrow=False,
-                         font=dict(size=13, color=col), xanchor="left", yanchor="middle"))
+                         font=dict(size=15 * escala, color=col), xanchor="left", yanchor="middle"))
         if clave != "Meta":
             anot.append(dict(x=x1 - 1.2, y=y + 0.07, text=f"<b>{pc:.0f}%</b>", showarrow=False,
-                             font=dict(size=17, color="#ffffff"), xanchor="right", yanchor="middle"))
+                             font=dict(size=21 * escala, color="#ffffff"), xanchor="right", yanchor="middle"))
         for fx in (x0 + 0.2 * (x1 - x0), (x0 + x1) / 2, x0 + 0.8 * (x1 - x0)):
             xs_clic.append(fx); ys_clic.append(y); claves_clic.append(clave)
             textos.append(f"<b>{etq}</b><br>{n:,} sitios · {pc:.0f}% de la meta")
@@ -1499,9 +1501,9 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
         x_ini = 50 - (len(regs) * ancho + (len(regs) - 1) * sep) / 2 + 4
         yc = R + 1.2
         ya, yb = yc - hch / 2, yc + hch / 2
-        rxc, ryc = (hch * px_y / 2) * 100 / 1100, hch / 2
+        rxc, ryc = (hch * px_y / 2) * 100 / 1400, hch / 2
         anot.append(dict(x=x_ini - 1.5, y=yc, text="<b>Región</b>", showarrow=False,
-                         font=dict(size=13, color="#c9b8ba"), xanchor="right", yanchor="middle"))
+                         font=dict(size=15 * escala, color="#c9b8ba"), xanchor="right", yanchor="middle"))
         for k, rg in enumerate(regs):
             x0 = x_ini + k * (ancho + sep)
             x1 = x0 + ancho
@@ -1515,7 +1517,7 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
                 line=dict(color="#ffffff" if activo else "rgba(255,255,255,.4)", width=2 if activo else 1.4)))
             etq_r = "Todas" if rg == "Todas" else rg.replace("Bogota ", "").replace("Bogotá ", "")
             anot.append(dict(x=(x0 + x1) / 2, y=yc, text=f"<b>{etq_r}</b>", showarrow=False,
-                             font=dict(size=14, color="#ffffff" if activo else "#d9c9cb"),
+                             font=dict(size=16 * escala, color="#ffffff" if activo else "#d9c9cb"),
                              xanchor="center", yanchor="middle"))
             for fx in (x0 + 0.25 * ancho, (x0 + x1) / 2, x0 + 0.75 * ancho):
                 xs_clic.append(fx); ys_clic.append(yc); claves_clic.append("reg::" + rg)
@@ -1534,14 +1536,20 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
         text=textos, hovertemplate="%{text}<extra></extra>"))
 
     anot.append(dict(xref="paper", yref="paper", x=0.5, y=1.0, text=f"<b>{titulo_txt}</b>",
-                     showarrow=False, font=dict(size=26, color="#ffffff"), bgcolor="#e2231a",
+                     showarrow=False, font=dict(size=min(30 * escala, 36), color="#ffffff"), bgcolor="#e2231a",
                      bordercolor="#ffffff", borderwidth=2, borderpad=10, yanchor="bottom"))
     fig.update_layout(
         shapes=formas, annotations=anot, height=alto, clickmode="event+select", dragmode=False,
-        paper_bgcolor="#140a0c", plot_bgcolor="#140a0c", margin=dict(l=10, r=10, t=78, b=10),
-        showlegend=False, hoverlabel=dict(bgcolor="#2a1a1d", font_size=13, font_color="#ffffff"),
+        paper_bgcolor="#140a0c", plot_bgcolor="#140a0c", margin=dict(l=10, r=10, t=int(84 * escala), b=int((64 if logo_uri else 10) * escala)),
+        showlegend=False, hoverlabel=dict(bgcolor="#2a1a1d", font_size=14, font_color="#ffffff"),
         xaxis=dict(visible=False, range=[0, 100], fixedrange=True),
         yaxis=dict(visible=False, range=[0.15, y_top], fixedrange=True))
+    if logo_uri:
+        plot_h = alto - 84 * escala - 64 * escala
+        fig.add_layout_image(dict(
+            source=logo_uri, xref="paper", yref="paper", x=1.0, y=0.0, xanchor="right",
+            yanchor="top", sizex=0.16, sizey=(54 * escala) / plot_h, sizing="contain",
+            layer="above"))
     mapa = {(round(x, 3), round(y, 3)): k for x, y, k in zip(xs_clic, ys_clic, claves_clic)}
     return fig, mapa
 
@@ -1566,9 +1574,20 @@ with tab_p:
             region_p = st.session_state["_pres_region"] = "Todas"
 
         if not presentacion:
-            ct1, ct2 = st.columns(2)
+            ct1, ct2, ct3 = st.columns([3, 2, 2])
             ct1.text_input("Título", "MODERNIZACIÓN R4 - 4Q", key="pres_titulo")
             ct2.text_input("Etiqueta de la meta", "Meta 4Q", key="pres_meta")
+            ct3.select_slider("Tamaño del gráfico", ["Normal", "Grande", "Extra grande"],
+                              value="Grande", key="pres_tam")
+            logo_up = st.file_uploader("Logo (PNG o JPG, opcional)", type=["png", "jpg", "jpeg"],
+                                       key="pres_logo",
+                                       help="También puedes dejar un archivo logo.png junto a "
+                                            "app.py en GitHub y se usa automáticamente.")
+            if logo_up is not None:
+                st.session_state["_pres_logo_v"] = logo_up.getvalue()
+            else:
+                st.session_state.pop("_pres_logo_v", None)
+            st.session_state["_pres_tam_v"] = st.session_state.get("pres_tam", "Grande")
             st.multiselect(
                 "Cajas adicionales dentro de la meta", extras,
                 default=[e for e in extras if cuenta_all.get(e, 0) > 0], key="pres_extras",
@@ -1580,6 +1599,19 @@ with tab_p:
             st.session_state["_pres_meta_v"] = st.session_state.get("pres_meta", "Meta 4Q")
             st.session_state["_pres_extras_v"] = list(st.session_state.get(
                 "pres_extras", [e for e in extras if cuenta_all.get(e, 0) > 0]))
+        escala_p = {"Normal": 1.0, "Grande": 1.2, "Extra grande": 1.4}.get(
+            st.session_state.get("_pres_tam_v", "Grande"), 1.2)
+        logo_bytes = st.session_state.get("_pres_logo_v")
+        if logo_bytes is None:
+            for nombre_logo in ("logo.png", "logo.jpg", "logo.jpeg"):
+                ruta_logo = Path(__file__).parent / nombre_logo
+                if ruta_logo.exists():
+                    logo_bytes = ruta_logo.read_bytes()
+                    break
+        logo_uri = None
+        if logo_bytes:
+            mime = "image/png" if logo_bytes[:4] == b"\x89PNG" else "image/jpeg"
+            logo_uri = f"data:{mime};base64," + base64.b64encode(logo_bytes).decode()
         titulo_p = st.session_state.get("_pres_titulo_v", "MODERNIZACIÓN R4 - 4Q")
         meta_p = st.session_state.get("_pres_meta_v", "Meta 4Q")
         extras_sel = st.session_state.get(
@@ -1605,7 +1637,8 @@ with tab_p:
                 st.rerun()
         else:
             fig_t, mapa_nodos = arbol_meta(titulo_arbol, meta_p, n_meta, n_ok, n_meta - n_ok,
-                                           hijos_ok, hijos_nok, list(sel_terr), region_p)
+                                           hijos_ok, hijos_nok, list(sel_terr), region_p,
+                                           escala_p, logo_uri)
             pto = leer_click(grafico_clic(fig_t, "clk_arbol"), "clk_arbol")
             if pto:
                 clave_n = mapa_nodos.get((round(float(pto.get("x", -1)), 3),
