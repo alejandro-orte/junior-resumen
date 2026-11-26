@@ -1408,15 +1408,18 @@ def _rgba(hex_, a):
     return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{a})"
 
 
-def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_nok):
+def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_nok,
+               regiones=(), region_sel="Todas"):
     """Árbol Meta → RFIC OK / RFIC NOK → cajas, con tarjetas clicables. Devuelve (fig, nodos)."""
     R = len(hijos_ok) + len(hijos_nok) + 1
     ys_ok = [R - i for i in range(len(hijos_ok))]
     ys_nok = [R - len(hijos_ok) - 1 - j for j in range(len(hijos_nok))]
     y_ok, y_nok = sum(ys_ok) / len(ys_ok), sum(ys_nok) / len(ys_nok)
     y_meta = (y_ok + y_nok) / 2
-    alto = max(580, 78 * (R + 1) + 110)
-    px_y = alto / (R + 0.7)               # píxeles por unidad vertical (aprox.)
+    con_chips = len(regiones) > 1
+    y_top = R + (1.75 if con_chips else 0.85)
+    alto = max(580, 78 * (R + 1) + 110 + (60 if con_chips else 0))
+    px_y = alto / (y_top - 0.15)               # píxeles por unidad vertical (aprox.)
     rx, ry = 10 * 100 / 1100, 10 / px_y   # esquinas de ~10 px
     h = 0.84                              # alto de cada tarjeta (unidades y)
 
@@ -1489,6 +1492,35 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
             xs_clic.append(fx); ys_clic.append(y); claves_clic.append(clave)
             textos.append(f"<b>{etq}</b><br>{n:,} sitios · {pc:.0f}% de la meta")
 
+    # Selector de región dentro del gráfico (casillas clicables)
+    if con_chips:
+        regs = ["Todas"] + list(regiones)
+        ancho, sep, hch = 13.5, 1.2, 0.5
+        x_ini = 50 - (len(regs) * ancho + (len(regs) - 1) * sep) / 2 + 4
+        yc = R + 1.2
+        ya, yb = yc - hch / 2, yc + hch / 2
+        rxc, ryc = (hch * px_y / 2) * 100 / 1100, hch / 2
+        anot.append(dict(x=x_ini - 1.5, y=yc, text="<b>Región</b>", showarrow=False,
+                         font=dict(size=13, color="#c9b8ba"), xanchor="right", yanchor="middle"))
+        for k, rg in enumerate(regs):
+            x0 = x_ini + k * (ancho + sep)
+            x1 = x0 + ancho
+            activo = rg == region_sel
+            formas.append(dict(
+                type="path", layer="below",
+                path=(f"M {x0 + rxc},{ya} L {x1 - rxc},{ya} Q {x1},{ya} {x1},{yc} "
+                      f"Q {x1},{yb} {x1 - rxc},{yb} L {x0 + rxc},{yb} Q {x0},{yb} {x0},{yc} "
+                      f"Q {x0},{ya} {x0 + rxc},{ya} Z"),
+                fillcolor="#e2231a" if activo else "rgba(255,255,255,.07)",
+                line=dict(color="#ffffff" if activo else "rgba(255,255,255,.4)", width=2 if activo else 1.4)))
+            etq_r = "Todas" if rg == "Todas" else rg.replace("Bogota ", "").replace("Bogotá ", "")
+            anot.append(dict(x=(x0 + x1) / 2, y=yc, text=f"<b>{etq_r}</b>", showarrow=False,
+                             font=dict(size=14, color="#ffffff" if activo else "#d9c9cb"),
+                             xanchor="center", yanchor="middle"))
+            for fx in (x0 + 0.25 * ancho, (x0 + x1) / 2, x0 + 0.75 * ancho):
+                xs_clic.append(fx); ys_clic.append(yc); claves_clic.append("reg::" + rg)
+                textos.append(f"<b>{etq_r}</b>")
+
     # Puntas de flecha
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -1499,7 +1531,7 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
         x=xs_clic, y=ys_clic, mode="markers", showlegend=False, customdata=claves_clic,
         marker=dict(symbol="square", size=58, color="rgba(255,255,255,0.01)"),
         unselected=dict(marker=dict(opacity=0.01)), selected=dict(marker=dict(opacity=0.01)),
-        text=textos, hovertemplate="%{text}<br><i>Clic para ver los sitios</i><extra></extra>"))
+        text=textos, hovertemplate="%{text}<extra></extra>"))
 
     anot.append(dict(xref="paper", yref="paper", x=0.5, y=1.0, text=f"<b>{titulo_txt}</b>",
                      showarrow=False, font=dict(size=26, color="#ffffff"), bgcolor="#e2231a",
@@ -1509,7 +1541,7 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
         paper_bgcolor="#140a0c", plot_bgcolor="#140a0c", margin=dict(l=10, r=10, t=78, b=10),
         showlegend=False, hoverlabel=dict(bgcolor="#2a1a1d", font_size=13, font_color="#ffffff"),
         xaxis=dict(visible=False, range=[0, 100], fixedrange=True),
-        yaxis=dict(visible=False, range=[0.15, R + 0.85], fixedrange=True))
+        yaxis=dict(visible=False, range=[0.15, y_top], fixedrange=True))
     mapa = {(round(x, 3), round(y, 3)): k for x, y, k in zip(xs_clic, ys_clic, claves_clic)}
     return fig, mapa
 
@@ -1527,11 +1559,11 @@ with tab_p:
         extras = ["Obra civil", "Carga negada", "Otros"]
         cuenta_all = dall["Caja presentación"].value_counts()
 
-        # Región (siempre visible: es un control de datos, no de edición)
+        # Región: se elige con las casillas dentro del gráfico
         reg_opciones = ["Todas"] + list(sel_terr)
-        if st.session_state.get("pres_region") not in reg_opciones:
-            st.session_state["pres_region"] = "Todas"
-        region_p = st.radio("Región", reg_opciones, horizontal=True, key="pres_region")
+        region_p = st.session_state.get("_pres_region", "Todas")
+        if region_p not in reg_opciones:
+            region_p = st.session_state["_pres_region"] = "Todas"
 
         if not presentacion:
             ct1, ct2 = st.columns(2)
@@ -1568,20 +1600,26 @@ with tab_p:
 
         if n_meta == 0:
             st.info("No hay sitios para esta selección.")
+            if st.button("Ver todas las regiones", key="pres_reset_region"):
+                st.session_state["_pres_region"] = "Todas"
+                st.rerun()
         else:
             fig_t, mapa_nodos = arbol_meta(titulo_arbol, meta_p, n_meta, n_ok, n_meta - n_ok,
-                                           hijos_ok, hijos_nok)
+                                           hijos_ok, hijos_nok, list(sel_terr), region_p)
             pto = leer_click(grafico_clic(fig_t, "clk_arbol"), "clk_arbol")
             if pto:
                 clave_n = mapa_nodos.get((round(float(pto.get("x", -1)), 3),
                                           round(float(pto.get("y", -1)), 3)))
-                if clave_n:
+                if clave_n and clave_n.startswith("reg::"):
+                    st.session_state["_pres_region"] = clave_n[5:]
+                    st.rerun()
+                elif clave_n:
                     ir_a_detalle("t4", PREFIJO_PRES + clave_n, region_p if region_p != "Todas" else "Todos")
             fuera = len(dreg) - n_meta
             if fuera > 0:
                 pista(f"La lista tiene {len(dreg):,} sitios; {fuera:,} quedan fuera de la meta "
                       "por las cajas adicionales desmarcadas.")
-        pista("👆 Haz clic en cualquier número para ver los sitios de esa caja.")
+        pista("👆 Haz clic en una región para filtrar, o en cualquier número para ver sus sitios.")
         if not presentacion:
             with st.expander("ℹ️ ¿Cómo se clasifica cada caja?"):
                 st.markdown(
