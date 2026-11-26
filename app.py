@@ -1410,6 +1410,42 @@ def _rgba(hex_, a):
     return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{a})"
 
 
+def preparar_logo(datos: bytes):
+    """Deja el logo listo para ponerlo sobre fondo oscuro: recorta márgenes y vuelve
+    transparente un fondo liso (blanco o negro) si lo tiene. Devuelve (uri, proporción)."""
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(datos)).convert("RGBA")
+        px = im.load()
+        w, h = im.size
+        con_alfa = any(px[x, y][3] < 200 for x in range(0, w, max(w // 20, 1))
+                       for y in range(0, h, max(h // 20, 1)))
+        if not con_alfa:
+            esq = [px[0, 0], px[w - 1, 0], px[0, h - 1], px[w - 1, h - 1]]
+            bg = tuple(sum(c[i] for c in esq) // 4 for i in range(3))
+            tol = 60
+            for y in range(h):
+                for x in range(w):
+                    r, g, b_, a_ = px[x, y]
+                    d = abs(r - bg[0]) + abs(g - bg[1]) + abs(b_ - bg[2])
+                    if d < tol:
+                        px[x, y] = (r, g, b_, 0)
+                    elif d < tol * 2:  # borde suave
+                        px[x, y] = (r, g, b_, int(255 * (d - tol) / tol))
+        caja = im.getchannel("A").point(lambda v: 255 if v > 20 else 0).getbbox()
+        if caja:
+            im = im.crop(caja)
+        if max(im.size) > 900:  # liviano para el navegador
+            im.thumbnail((900, 900))
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return ("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(),
+                im.size[0] / max(im.size[1], 1))
+    except Exception:  # noqa: BLE001
+        mime = "image/png" if datos[:4] == b"\x89PNG" else "image/jpeg"
+        return f"data:{mime};base64," + base64.b64encode(datos).decode(), 2.5
+
+
 def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_nok,
                regiones=(), region_sel="Todas", escala=1.0, logo_uri=None):
     """Árbol Meta → RFIC OK / RFIC NOK → cajas, con tarjetas clicables. Devuelve (fig, nodos)."""
@@ -1420,8 +1456,8 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
     y_meta = (y_ok + y_nok) / 2
     con_chips = len(regiones) > 1
     y_top = R + (1.75 if con_chips else 0.85)
-    alto = int(max(600, 80 * (R + 1) + 120 + (60 if con_chips else 0) + (50 if logo_uri else 0)) * escala)
-    px_y = (alto - 90 * escala) / (y_top - 0.15)               # píxeles por unidad vertical (aprox.)
+    alto = int(max(600, 80 * (R + 1) + 120 + (60 if con_chips else 0) + (80 if logo_uri else 0)) * escala)
+    px_y = (alto - 90 * escala) / (y_top - (-1.0 if logo_uri else 0.15))               # píxeles por unidad vertical (aprox.)
     rx, ry = 10 * escala * 100 / 1400, 10 * escala / px_y   # esquinas de ~10 px
     h = 0.84                              # alto de cada tarjeta (unidades y)
 
@@ -1540,16 +1576,18 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
                      bordercolor="#ffffff", borderwidth=2, borderpad=10, yanchor="bottom"))
     fig.update_layout(
         shapes=formas, annotations=anot, height=alto, clickmode="event+select", dragmode=False,
-        paper_bgcolor="#140a0c", plot_bgcolor="#140a0c", margin=dict(l=10, r=10, t=int(84 * escala), b=int((64 if logo_uri else 10) * escala)),
+        paper_bgcolor="#140a0c", plot_bgcolor="#140a0c", margin=dict(l=10, r=10, t=int(84 * escala), b=10),
         showlegend=False, hoverlabel=dict(bgcolor="#2a1a1d", font_size=14, font_color="#ffffff"),
         xaxis=dict(visible=False, range=[0, 100], fixedrange=True),
-        yaxis=dict(visible=False, range=[0.15, y_top], fixedrange=True))
+        yaxis=dict(visible=False, range=[(-1.0 if logo_uri else 0.15), y_top], fixedrange=True))
     if logo_uri:
-        plot_h = alto - 84 * escala - 64 * escala
+        uri, aspecto = logo_uri
+        alto_u = 0.78                                   # unidades y
+        ancho_u = min(alto_u * px_y * aspecto * 100 / 1400, 30)
+        alto_u = ancho_u * 1400 / 100 / (px_y * aspecto)
         fig.add_layout_image(dict(
-            source=logo_uri, xref="paper", yref="paper", x=1.0, y=0.0, xanchor="right",
-            yanchor="top", sizex=0.16, sizey=(54 * escala) / plot_h, sizing="contain",
-            layer="above"))
+            source=uri, xref="x", yref="y", x=98, y=-0.95, xanchor="right", yanchor="bottom",
+            sizex=ancho_u, sizey=alto_u, sizing="contain", layer="above", opacity=.95))
     mapa = {(round(x, 3), round(y, 3)): k for x, y, k in zip(xs_clic, ys_clic, claves_clic)}
     return fig, mapa
 
@@ -1577,8 +1615,8 @@ with tab_p:
             ct1, ct2, ct3 = st.columns([3, 2, 2])
             ct1.text_input("Título", "MODERNIZACIÓN R4 - 4Q", key="pres_titulo")
             ct2.text_input("Etiqueta de la meta", "Meta 4Q", key="pres_meta")
-            ct3.select_slider("Tamaño del gráfico", ["Normal", "Grande", "Extra grande"],
-                              value="Grande", key="pres_tam")
+            ct3.select_slider("Tamaño del gráfico", ["Compacto", "Normal", "Grande"],
+                              value="Normal", key="pres_tam2")
             logo_up = st.file_uploader("Logo (PNG o JPG, opcional)", type=["png", "jpg", "jpeg"],
                                        key="pres_logo",
                                        help="También puedes dejar un archivo logo.png junto a "
@@ -1587,7 +1625,7 @@ with tab_p:
                 st.session_state["_pres_logo_v"] = logo_up.getvalue()
             else:
                 st.session_state.pop("_pres_logo_v", None)
-            st.session_state["_pres_tam_v"] = st.session_state.get("pres_tam", "Grande")
+            st.session_state["_pres_tam_v"] = st.session_state.get("pres_tam2", "Normal")
             st.multiselect(
                 "Cajas adicionales dentro de la meta", extras,
                 default=[e for e in extras if cuenta_all.get(e, 0) > 0], key="pres_extras",
@@ -1599,8 +1637,8 @@ with tab_p:
             st.session_state["_pres_meta_v"] = st.session_state.get("pres_meta", "Meta 4Q")
             st.session_state["_pres_extras_v"] = list(st.session_state.get(
                 "pres_extras", [e for e in extras if cuenta_all.get(e, 0) > 0]))
-        escala_p = {"Normal": 1.0, "Grande": 1.2, "Extra grande": 1.4}.get(
-            st.session_state.get("_pres_tam_v", "Grande"), 1.2)
+        escala_p = {"Compacto": 0.85, "Normal": 1.0, "Grande": 1.2}.get(
+            st.session_state.get("_pres_tam_v", "Normal"), 1.0)
         logo_bytes = st.session_state.get("_pres_logo_v")
         if logo_bytes is None:
             for nombre_logo in ("logo.png", "logo.jpg", "logo.jpeg"):
@@ -1610,8 +1648,7 @@ with tab_p:
                     break
         logo_uri = None
         if logo_bytes:
-            mime = "image/png" if logo_bytes[:4] == b"\x89PNG" else "image/jpeg"
-            logo_uri = f"data:{mime};base64," + base64.b64encode(logo_bytes).decode()
+            logo_uri = preparar_logo(logo_bytes)
         titulo_p = st.session_state.get("_pres_titulo_v", "MODERNIZACIÓN R4 - 4Q")
         meta_p = st.session_state.get("_pres_meta_v", "Meta 4Q")
         extras_sel = st.session_state.get(
