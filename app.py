@@ -1636,6 +1636,8 @@ if pantalla == PANTALLA_TSS:
 
 MODO_ARCHIVOS = "Lista de sitios + RF + baseline"
 MODO_EXCEL = "Excel completo de control"
+SIT_PC = "📁 Archivo del PC (Excel/CSV)"
+SIT_PEGAR = "✍️ Pegar los nombres aquí"
 FUENTE_RECALC = "Recalculado (corregido)"
 FUENTE_EXCEL = "Resumen del Excel"
 
@@ -1659,11 +1661,28 @@ with st.sidebar:
         st.caption(f"📢 Datos publicados el {_pub.get('publicado', '—')}"
                    + (". Si subes archivos nuevos, se usan en vez de los publicados."
                       if ES_ADMIN else "."))
+    fuente_sitios = SIT_PC
+    if modo_arch:
+        _sit_pub = "sitios" in _arch_pub
+        fuente_sitios = st.radio(
+            "1 · ¿De dónde salen los sitios?", [SIT_PC, SIT_PEGAR], key="fuente_sitios",
+            index=0 if (_sit_pub or not _hay_pub) else 1,
+            help="• Archivo del PC: el Excel/CSV con la lista de sitios (el publicado desde el "
+                 "computador, o uno que subas si eres administrador).\n"
+                 "• Pegar: escribe o pega los nombres, uno por línea. Solo vale para esta sesión.")
+        if fuente_sitios == SIT_PEGAR:
+            txt_sitios = st.text_area("Pega los nombres (uno por línea)", height=120,
+                                      key="txt_sitios")
+        elif _mostrar_carg:
+            f_sitios = st.file_uploader("Lista de sitios (.csv, .txt, .xlsx)",
+                                        type=["csv", "txt", "xlsx", "xlsm"], key="up_sitios")
+            if _sit_pub and f_sitios is None:
+                st.caption("Se usa la lista de sitios publicada desde el PC.")
+        elif _sit_pub:
+            st.caption("Se usa la lista de sitios publicada desde el PC.")
+        else:
+            st.warning("No hay una lista de sitios publicada. Pega los nombres.")
     if modo_arch and _mostrar_carg:
-        f_sitios = st.file_uploader("1 · Lista de sitios (.csv, .txt, .xlsx)",
-                                    type=["csv", "txt", "xlsx", "xlsm"], key="up_sitios")
-        txt_sitios = st.text_area("…o pega los nombres (uno por línea)", height=90,
-                                  key="txt_sitios")
         f_rf = st.file_uploader("2 · Export de RF (.xls, .xlsx, .csv, .htm, .html)",
                                 type=["xlsx", "xlsm", "xls", "csv", "htm", "html"], key="up_rf")
         f_bl = st.file_uploader("3 · Export de baseline (.xls, .xlsx, .csv, .htm, .html)",
@@ -1710,20 +1729,25 @@ diferencias = []
 
 if modo_arch:
     _subidos = {"rf": f_rf, "baseline": f_bl}
-    sitios = list(leer_lista(f_sitios.getvalue(), f_sitios.name)) if f_sitios else []
-    sitios = limpiar_sitios(sitios + txt_sitios.splitlines())
-    if not sitios and pub_archivo("sitios") is not None:
-        _sp = pub_archivo("sitios")
-        sitios = limpiar_sitios(list(leer_lista(_sp.getvalue(), _sp.name)))
+    if fuente_sitios == SIT_PEGAR:
+        sitios = limpiar_sitios(txt_sitios.splitlines())
+    else:
+        sitios = limpiar_sitios(list(leer_lista(f_sitios.getvalue(), f_sitios.name))) if f_sitios else []
+        if not sitios and pub_archivo("sitios") is not None:
+            _sp = pub_archivo("sitios")
+            sitios = limpiar_sitios(list(leer_lista(_sp.getvalue(), _sp.name)))
     f_rf = f_rf or pub_archivo("rf")
     f_bl = f_bl or pub_archivo("baseline")
     if not (f_rf and f_bl and sitios):
-        faltan = [n for n, ok in (("la lista de sitios", bool(sitios)), ("el export de RF", bool(f_rf)),
+        faltan = [n for n, ok in (("la lista de sitios" if fuente_sitios == SIT_PC
+                                   else "los nombres de los sitios (pégalos)", bool(sitios)),
+                                  ("el export de RF", bool(f_rf)),
                                   ("el export de baseline", bool(f_bl))) if not ok]
         st.info("Para empezar sube " + ", ".join(faltan) + " en la barra lateral.")
         st.stop()
     with st.sidebar:
-        st.caption(f"✅ {len(sitios)} sitios en la lista")
+        st.caption(f"✅ {len(sitios)} sitios en la lista"
+                   + (" (pegados)" if fuente_sitios == SIT_PEGAR else " (archivo)"))
     try:
         planes_disp = planes_disponibles(f_rf.getvalue(), f_rf.name, tuple(sitios))
     except Exception as e:  # noqa: BLE001
@@ -1752,7 +1776,7 @@ if modo_arch:
         st.stop()
     if ES_ADMIN:
         _ent = {k: (v.name, v.getvalue()) for k, v in _subidos.items() if v is not None}
-        if f_sitios is not None or txt_sitios.strip() or not _hay_pub:
+        if f_sitios is not None or (fuente_sitios == SIT_PEGAR and txt_sitios.strip()) or not _hay_pub:
             _ent["sitios"] = ("sitios.txt", "\n".join(sitios).encode("utf-8"))
         bloque_publicar(_ent, {"modo": "archivos", "proyecto": proyecto, "region": region_txt})
     total_col = proyecto.strip() or "Proyecto"
