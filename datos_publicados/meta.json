@@ -2,12 +2,14 @@
  "archivos": {
   "rf": "rf.xls",
   "baseline": "baseline.xls",
-  "concepto": "concepto.xls"
+  "concepto": "concepto.xls",
+  "spi": "spi.xlsx"
  },
  "versiones": {
   "rf": "4413e3dce0",
   "baseline": "15f7ee2be7",
-  "concepto": "4ce3b1057f"
+  "concepto": "4ce3b1057f",
+  "spi": "0daa02e121"
  },
  "origen": {
   "rf": {
@@ -21,11 +23,15 @@
   "concepto": {
    "archivo": "PlanBSS27111041.xls",
    "modificado": "27/11/2026 10:42"
+  },
+  "spi": {
+   "archivo": "SPI LTE Sitios Existentes 2026_W47.xlsx",
+   "modificado": "27/11/2026 11:35"
   }
  },
  "modo": "archivos",
  "proyecto": "MODERNIZACION_2026",
  "region": "R4",
- "publicado": "27/11/2026 15:18",
- "solicitud": "c309c98398"
+ "publicado": "27/11/2026 15:20",
+ "solicitud": "ee56e140f9"
 }
