@@ -1,0 +1,31 @@
+{
+ "archivos": {
+  "rf": "rf.xls",
+  "baseline": "baseline.xls",
+  "concepto": "concepto.xls"
+ },
+ "versiones": {
+  "rf": "cd5045c1e1",
+  "baseline": "15f7ee2be7",
+  "concepto": "e5ea84cfd3"
+ },
+ "origen": {
+  "rf": {
+   "archivo": "PlanBSS19111320.xls",
+   "modificado": "19/11/2026 13:20"
+  },
+  "baseline": {
+   "archivo": "BaseLine19111322.xls",
+   "modificado": "19/11/2026 13:22"
+  },
+  "concepto": {
+   "archivo": "concepto tss.xls",
+   "modificado": "26/11/2026 15:22"
+  }
+ },
+ "modo": "archivos",
+ "proyecto": "MODERNIZACION_2026",
+ "region": "R4",
+ "publicado": "27/11/2026 10:22",
+ "solicitud": "db0339ff60"
+}
