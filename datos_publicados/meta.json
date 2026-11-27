@@ -7,7 +7,7 @@
  "versiones": {
   "rf": "cd5045c1e1",
   "baseline": "15f7ee2be7",
-  "concepto": "e5ea84cfd3"
+  "concepto": "4ce3b1057f"
  },
  "origen": {
   "rf": {
@@ -19,13 +19,13 @@
    "modificado": "19/11/2026 13:22"
   },
   "concepto": {
-   "archivo": "concepto tss.xls",
-   "modificado": "26/11/2026 15:22"
+   "archivo": "PlanBSS27111041.xls",
+   "modificado": "27/11/2026 10:42"
   }
  },
  "modo": "archivos",
  "proyecto": "MODERNIZACION_2026",
  "region": "R4",
- "publicado": "27/11/2026 10:30",
- "solicitud": "1003157ac6"
+ "publicado": "27/11/2026 10:50",
+ "solicitud": "a671eb07dc"
 }
