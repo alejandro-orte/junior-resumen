@@ -1792,6 +1792,16 @@ with st.sidebar:
     elif not modo_arch and _mostrar_carg:
         archivo = st.file_uploader("Sube el control (.xlsx)", type=["xlsx", "xlsm"])
         st.caption("Se lee la pestaña **Resumen** y se recalcula desde **Sitios**.")
+    f_spi = None
+    if _mostrar_carg:
+        f_spi = st.file_uploader("SPI semanal · cuadro de la presentación (.xlsx, opcional)",
+                                 type=["xlsx", "xlsm"], key="up_spi",
+                                 help="Excel del SPI (hoja «MOD 2026»). En la pestaña Presentación se "
+                                      "muestra solo la regional Centro y el mes actual.")
+
+_spi_subido = f_spi
+f_spi = f_spi or pub_archivo("spi")
+_ent_spi = {"spi": (_spi_subido.name, _spi_subido.getvalue())} if _spi_subido is not None else {}
 
 with st.sidebar:
     st.header("⚙️ Criterio de RFIC-OK")
@@ -1875,6 +1885,7 @@ if modo_arch:
         _ent = {k: (v.name, v.getvalue()) for k, v in _subidos.items() if v is not None}
         if f_sitios is not None or (fuente_sitios == SIT_PEGAR and txt_sitios.strip()) or not _hay_pub:
             _ent["sitios"] = ("sitios.txt", "\n".join(sitios).encode("utf-8"))
+        _ent.update(_ent_spi)
         bloque_publicar(_ent, {"modo": "archivos", "proyecto": proyecto, "region": region_txt})
     total_col = proyecto.strip() or "Proyecto"
     info = {"region": region_txt.strip() or "—", "total_col": total_col, "ref_encabezado": None}
@@ -1888,8 +1899,9 @@ else:
         st.info("Sube el archivo de control en la barra lateral para ver el resumen.")
         st.stop()
     if ES_ADMIN:
-        bloque_publicar({"control": (archivo.name, archivo.getvalue())} if _archivo_subido is not None
-                        else {}, {"modo": "excel"})
+        _ent_x = {"control": (archivo.name, archivo.getvalue())} if _archivo_subido is not None else {}
+        _ent_x.update(_ent_spi)
+        bloque_publicar(_ent_x, {"modo": "excel"})
     try:
         df_excel, df_recalc, sin_terr, det, terr_excel, total_col, info, error_recalc = cargar(archivo.getvalue(), criterio_rfic)
     except Exception as e:  # noqa: BLE001
@@ -2349,6 +2361,141 @@ def preparar_logo(datos: bytes):
         return f"data:{mime};base64," + base64.b64encode(datos).decode(), 2.5
 
 
+# ---------------------------------------------------------------------------
+# Cuadro SPI (Excel del SPI semanal) para la pestaña Presentación
+# ---------------------------------------------------------------------------
+MESES_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
+            "septiembre", "octubre", "noviembre", "diciembre"]
+
+
+@st.cache_data(show_spinner=False)
+def spi_leer(contenido: bytes, mes: int, region: str = "centro", hoja_pref: str = "MOD 2026"):
+    """Lee el bloque del mes de la hoja del SPI (solo la regional pedida).
+    Devuelve {'mes', 'regional', 'proyecto', 'semanas', 'filas': {'Semanal': [...], 'Acumulado': [...]}}."""
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(contenido), data_only=True, read_only=True)
+    hojas = ([h for h in wb.sheetnames if _plano(h) == _plano(hoja_pref)]
+             + [h for h in wb.sheetnames if _plano(h) != _plano(hoja_pref)])
+    for h in hojas:
+        filas = [list(r) for r in wb[h].iter_rows(min_row=1, max_row=80, values_only=True)]
+        ancho = max((len(r) for r in filas), default=0)
+        filas = [r + [None] * (ancho - len(r)) for r in filas]
+        enc = None
+        for i, r in enumerate(filas):
+            pl = [_plano(v) if v is not None else "" for v in r]
+            if "regional" in pl and "proyecto" in pl and "tipo" in pl and i >= 2:
+                enc = (i, pl.index("regional"))
+                break
+        if enc is None:
+            continue
+        i_h, c0 = enc
+        r_mes, r_pas, r_sem = filas[i_h - 2], filas[i_h - 1], filas[i_h]
+        if "plan" not in [_plano(v) for v in r_pas if v is not None]:
+            continue
+        # bloques de mes: cada celda con texto en la fila de meses abre un bloque
+        inicios = [(c, str(r_mes[c]).strip()) for c in range(c0 + 3, ancho)
+                   if r_mes[c] is not None and str(r_mes[c]).strip()]
+        if not inicios:
+            continue
+        bloques = []
+        for k, (c, nombre) in enumerate(inicios):
+            fin = (inicios[k + 1][0] if k + 1 < len(inicios) else ancho) - 1
+            bloques.append((nombre, c, fin))
+        elegido = next((b for b in bloques if _plano(b[0]) == MESES_ES[mes - 1]), None) or bloques[-1]
+        nombre_mes, ini, fin = elegido
+        semanas = []
+        for c in range(ini, fin + 1):
+            if _plano(r_pas[c]) == "plan":
+                semanas.append((str(r_sem[c]).strip(), c))
+        reg = {"Semanal": None, "Acumulado": None}
+        regional = proyecto = ""
+        for r in filas[i_h + 1:]:
+            if r[c0] is None or _plano(region) not in _plano(r[c0]):
+                continue
+            tipo = str(r[c0 + 2]).strip().capitalize()
+            if tipo not in reg or reg[tipo] is not None:
+                continue
+            regional, proyecto = str(r[c0]).strip(), str(r[c0 + 1] or "").strip()
+            reg[tipo] = [(r[c], r[c + 1], r[c + 2]) for _, c in semanas]
+        if not semanas or all(v is None for v in reg.values()):
+            raise ValueError(f"No encontré la regional «{region}» en la hoja «{h}».")
+        return {"mes": nombre_mes, "regional": regional, "proyecto": proyecto,
+                "semanas": [w for w, _ in semanas], "filas": {k: v for k, v in reg.items() if v is not None}}
+    raise ValueError("No encontré la tabla del SPI (columnas Regional, Proyecto y Tipo con "
+                     "Plan, Actual y SPI).")
+
+
+@st.cache_data(show_spinner=False)
+def spi_imagen(datos: dict):
+    """Cuadro del SPI con el mismo estilo del Excel. Devuelve (uri PNG, proporción ancho/alto)."""
+    from PIL import Image, ImageDraw
+    S = 2                                           # sobremuestreo para que se vea nítido
+    w_reg, w_pro, w_tip, w_met, alto = 150, 118, 108, 56, 30
+    n = len(datos["semanas"])
+    ancho = (w_reg + w_pro + w_tip + 3 * w_met * n) * S
+    filas = list(datos["filas"].items())
+    img = Image.new("RGB", (ancho, (3 + len(filas)) * alto * S + 2), "white")
+    d = ImageDraw.Draw(img)
+    f_b, f_n, f_s = _ct_fuente(17 * S, True), _ct_fuente(17 * S), _ct_fuente(16 * S, True)
+    GRIS, ROJO, AZUL, AMAR, BORDE = (127, 127, 127), (192, 0, 0), (68, 84, 106), (255, 230, 153), (191, 191, 191)
+    izq = (w_reg + w_pro + w_tip) * S
+
+    def celda(x0, y0, x1, y1, fondo="white", texto=None, fuente=f_n, color="black", alin="c", dx=0):
+        d.rectangle((x0, y0, x1, y1), fill=fondo, outline=BORDE)
+        if texto is not None and texto != "":
+            cx = (x0 + x1) // 2 + dx if alin == "c" else x0 + 8 * S
+            d.text((cx, (y0 + y1) // 2), str(texto), font=fuente, fill=color,
+                   anchor="mm" if alin == "c" else "lm")
+
+    def filtro(x1, y0):
+        bx, by = x1 - 17 * S, y0 + 8 * S
+        d.rectangle((bx, by, bx + 12 * S, by + 14 * S), fill=(240, 240, 240), outline=(170, 170, 170))
+        d.polygon([(bx + 3 * S, by + 5 * S), (bx + 9 * S, by + 5 * S), (bx + 6 * S, by + 9 * S)],
+                  fill=(60, 60, 60))
+
+    h = alto * S
+    # fila 0: mes (solo sobre las semanas)
+    celda(izq, 0, ancho - 1, h, GRIS, datos["mes"], f_b, "white")
+    # fila 1: Plan / Actual / SPI
+    for k in range(n):
+        for j, (txt, col) in enumerate((("Plan", GRIS), ("Actual", ROJO), ("SPI", GRIS))):
+            x0 = izq + (3 * k + j) * w_met * S
+            celda(x0, h, x0 + w_met * S, 2 * h, col, txt, f_b, "white")
+    # fila 2: encabezados de la izquierda y semanas
+    for x0, w_, txt in ((0, w_reg, "Regional"), (w_reg * S, w_pro, "Proyecto"),
+                        ((w_reg + w_pro) * S, w_tip, "Tipo")):
+        celda(x0, 2 * h, x0 + w_ * S, 3 * h, "white", txt, f_b, "black", dx=-7 * S)
+        filtro(x0 + w_ * S, 2 * h)
+    for k, sem in enumerate(datos["semanas"]):
+        for j in range(3):
+            x0 = izq + (3 * k + j) * w_met * S
+            celda(x0, 2 * h, x0 + w_met * S, 3 * h, AZUL, sem, f_s, "white", dx=-7 * S)
+            filtro(x0 + w_met * S, 2 * h)
+    # filas de datos
+    for fi, (tipo, vals) in enumerate(filas):
+        y0 = (3 + fi) * h
+        fondo = AMAR if tipo == "Semanal" else "white"
+        for x0, w_, txt in ((0, w_reg, datos["regional"]), (w_reg * S, w_pro, datos["proyecto"]),
+                            ((w_reg + w_pro) * S, w_tip, tipo)):
+            celda(x0, y0, x0 + w_ * S, y0 + h, fondo, txt, f_n, "black")
+        for k, (pl, ac, spi) in enumerate(vals):
+            for j, v in enumerate((pl, ac, spi)):
+                if v is None or v == "":
+                    t = ""
+                elif j == 2 and isinstance(v, (int, float)):
+                    t = f"{v * 100:.0f}%"
+                elif isinstance(v, float) and v == int(v):
+                    t = f"{int(v)}"
+                else:
+                    t = f"{v:,.0f}" if isinstance(v, (int, float)) else str(v)
+                x0 = izq + (3 * k + j) * w_met * S
+                celda(x0, y0, x0 + w_met * S, y0 + h, "white", t, f_n, "black")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return ("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(),
+            img.size[0] / img.size[1])
+
+
 def aclarar(hex_: str, a: float) -> str:
     h = hex_.lstrip("#")
     return "#%02x%02x%02x" % tuple(int(round(int(h[i:i + 2], 16) + (255 - int(h[i:i + 2], 16)) * a))
@@ -2370,7 +2517,7 @@ def degradado(hex_: str, n: int) -> list:
 
 
 def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_nok,
-               regiones=(), region_sel="Todas", escala=1.0, logo_uri=None):
+               regiones=(), region_sel="Todas", escala=1.0, logo_uri=None, spi_uri=None):
     """Árbol Meta → RFIC OK / RFIC NOK → cajas, con tarjetas clicables. Devuelve (fig, nodos)."""
     R = len(hijos_ok) + len(hijos_nok) + 1
     ys_ok = [R - i for i in range(len(hijos_ok))]
@@ -2379,7 +2526,7 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
     y_meta = (y_ok + y_nok) / 2
     con_chips = len(regiones) > 1
     y_top = R + (1.75 if con_chips else 0.85)
-    extra_t = 0
+    extra_t = 50 if spi_uri else 0         # espacio extra arriba para el cuadro SPI
     alto = int(max(600, 80 * (R + 1) + 120 + (60 if con_chips else 0)) * escala) + int(extra_t * escala)
     px_y = (alto - (90 + extra_t) * escala) / (y_top - 0.15)               # píxeles por unidad vertical (aprox.)
     rx, ry = 10 * escala * 100 / 1400, 10 * escala / px_y   # esquinas de ~10 px
@@ -2525,10 +2672,11 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
         unselected=dict(marker=dict(opacity=0.01)), selected=dict(marker=dict(opacity=0.01)),
         text=textos, hovertemplate="%{text}<extra></extra>"))
 
-    texto_titulo = f"<b>{titulo_txt}</b>"
-    anot.append(dict(xref="paper", yref="paper", x=0.5, y=1.0, text=texto_titulo,
-                     showarrow=False, font=dict(size=min(30 * escala, 36), color="#ffffff"), bgcolor="#e2231a",
-                     bordercolor="#ffffff", borderwidth=2, borderpad=10, yanchor="bottom"))
+    if not spi_uri:
+        anot.append(dict(xref="paper", yref="paper", x=0.5, y=1.0, text=f"<b>{titulo_txt}</b>",
+                         showarrow=False, font=dict(size=min(30 * escala, 36), color="#ffffff"),
+                         bgcolor="#e2231a", bordercolor="#ffffff", borderwidth=2, borderpad=10,
+                         yanchor="bottom"))
     fig.update_layout(
         shapes=formas, annotations=anot, height=alto, clickmode="event+select", dragmode=False,
         paper_bgcolor="#0a0507", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=10, r=10, t=int((84 + extra_t) * escala), b=10),
@@ -2543,6 +2691,15 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
         fig.add_layout_image(dict(
             source=uri, xref="x", yref="y", x=1.5, y=y_base, xanchor="left", yanchor="bottom",
             sizex=23.5, sizey=alto_logo, sizing="contain", layer="above", opacity=1))
+    if spi_uri:
+        uri_s, asp_s = spi_uri
+        mt_px = (84 + extra_t) * escala
+        plot_h = alto - mt_px - 10
+        caja_px = mt_px - 22
+        fig.add_layout_image(dict(
+            source=uri_s, xref="paper", yref="paper", x=0.5, y=1 + 8 / plot_h,
+            xanchor="center", yanchor="bottom", sizex=0.82, sizey=caja_px / plot_h,
+            sizing="contain", layer="above", opacity=1))
     fig.add_layout_image(dict(
         source=fondo_oscuro(1400, alto), xref="paper", yref="paper", x=0, y=1, sizex=1, sizey=1,
         xanchor="left", yanchor="top", sizing="stretch", layer="below"))
@@ -2603,6 +2760,18 @@ with tab_p:
         logo_uri = None
         if logo_bytes:
             logo_uri = preparar_logo(logo_bytes)
+        spi_uri = None
+        if f_spi is not None:
+            try:
+                _mes_hoy = datetime.datetime.now(ZoneInfo("America/Bogota")).month
+                _spi_d = spi_leer(f_spi.getvalue(), _mes_hoy, "centro")
+                spi_uri = spi_imagen(_spi_d)
+                if not presentacion:
+                    st.caption(f"📈 Cuadro SPI: {_spi_d['regional']} · {_spi_d['mes']} · "
+                               f"archivo {f_spi.name}. Reemplaza al título del gráfico.")
+            except Exception as e:  # noqa: BLE001
+                _msg = ("el archivo no es un Excel .xlsx válido" if "zip" in str(e).lower() else str(e))
+                st.warning(f"No pude leer el SPI: {_msg}. Se muestra el título en su lugar.")
         titulo_p = st.session_state.get("_pres_titulo_v", "MODERNIZACIÓN R4 - 4Q")
         meta_p = st.session_state.get("_pres_meta_v", "Meta 4Q")
         extras_sel = st.session_state.get(
@@ -2628,7 +2797,7 @@ with tab_p:
         else:
             fig_t, mapa_nodos = arbol_meta(titulo_arbol, meta_p, n_meta, n_ok, n_meta - n_ok,
                                            hijos_ok, hijos_nok, list(sel_terr), region_p,
-                                           escala_p, logo_uri)
+                                           escala_p, logo_uri, spi_uri)
             pto = leer_click(grafico_clic(fig_t, "clk_arbol"), "clk_arbol")
             if pto:
                 clave_n = mapa_nodos.get((round(float(pto.get("x", -1)), 3),
