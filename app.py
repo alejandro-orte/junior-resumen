@@ -521,10 +521,18 @@ def leer_lista(contenido: bytes, nombre: str) -> tuple:
     return tuple(limpiar_sitios(lineas))
 
 
+def es_nokia(v) -> bool:
+    """True si la celda es texto y menciona a Nokia (p. ej. «Nokia», «NOKIA»)."""
+    return isinstance(v, str) and "nokia" in v.lower()
+
+
 def _convertir_fechas_texto(df: pd.DataFrame) -> pd.DataFrame:
     """Los exports de texto (csv/html) traen las fechas como texto: se convierten a fecha."""
     conocidas = {n for nombres in HITO_RF.values() for n in nombres}
     for c in df.columns:
+        if _plano(c) == "cw lista":
+            # «Nokia» en CW Lista cuenta como obra civil lista aunque no tenga fecha
+            df["__cw_nokia"] = df[c].map(es_nokia)
         if _plano(c) in conocidas:
             df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True, format="mixed")
     return df
@@ -621,6 +629,13 @@ def planes_disponibles(rf_bytes: bytes, rf_nombre: str, sitios: tuple) -> list:
     return list(vc.index)
 
 
+def cw_nokia(r: pd.DataFrame, col) -> pd.Series:
+    """Trabajos cuya CW Lista dice «Nokia» (en csv/html se guardó aparte al leer)."""
+    if "__cw_nokia" in r.columns:
+        return r["__cw_nokia"].fillna(False).astype(bool)
+    return r[col].map(es_nokia)
+
+
 @st.cache_data(show_spinner="Calculando…")
 def procesar_archivos(rf_bytes, rf_nombre, bl_bytes, bl_nombre, sitios: tuple, planes: tuple,
                       criterio: str = RFIC_COLUMNA):
@@ -655,7 +670,10 @@ def procesar_archivos(rf_bytes, rf_nombre, bl_bytes, bl_nombre, sitios: tuple, p
             det[HITO_A_DETALLE[clave_h]] = pd.NaT
             continue
         f = pd.DataFrame({"_k": r["_k"], "f": r[col].map(a_fecha)})
-        ag = f.groupby("_k")["f"].agg(["count", "max"])
+        f["v"] = f["f"].notna()
+        if clave_h == "OBRA CIVIL OK":
+            f["v"] = f["v"] | cw_nokia(r, col).values
+        ag = f.groupby("_k").agg(count=("v", "sum"), max=("f", "max"))
         ok = (ag["count"] == n_jobs.reindex(ag.index)) & (ag["count"] > 0)
         det["ok_" + clave_h] = [bool(ok.get(k, False)) for k in claves]
         det[HITO_A_DETALLE[clave_h]] = [ag["max"].get(k, pd.NaT) if ok.get(k, False) else pd.NaT
@@ -672,7 +690,9 @@ def procesar_archivos(rf_bytes, rf_nombre, bl_bytes, bl_nombre, sitios: tuple, p
             det["RFIC"] = pd.NaT
         else:
             f3 = pd.DataFrame({i: r[c].map(a_fecha) for i, c in enumerate(cols3)})
-            job_ok = f3.notna().all(axis=1)
+            v3 = f3.notna()
+            v3[1] = v3[1] | cw_nokia(r, cols3[1])  # CW Lista: «Nokia» cuenta como OK
+            job_ok = v3.all(axis=1)
             tmp = pd.DataFrame({"_k": r["_k"], "ok": job_ok, "f": f3.max(axis=1).where(job_ok)})
             ag = tmp.groupby("_k").agg(n_ok=("ok", "sum"), mx=("f", "max"))
             ok = (ag["n_ok"] == n_jobs.reindex(ag.index)) & (ag["n_ok"] > 0)
@@ -1599,7 +1619,8 @@ def pantalla_concepto_tss():
                           index=(regiones.index("Centro") + 1) if "Centro" in regiones else 0)
     corte = o2.date_input("Fecha de corte", hoy, help="Los días hábiles se cuentan hasta esta fecha.")
     solo_fuera = o3.checkbox("Solo fuera de ventana (más de 5 días hábiles)", value=False)
-    c_tit = st.checkbox("Agregar la fecha de corte al título de cada imagen", value=False)
+    c_tit = st.checkbox("Agregar la fecha de corte al título", value=False)
+    c_tit_img = st.checkbox("Escribir también el título dentro de la imagen", value=False)
     por_img = st.slider("Filas por imagen", 10, 60, 30, help="Si hay más filas, se parte en varias "
                                                              "imágenes para que se lean bien en WhatsApp.")
 
@@ -1636,16 +1657,17 @@ def pantalla_concepto_tss():
              + [a for a in por_area.index if a not in CT_ORDEN_AREA])
 
     st.subheader("Para pegar en WhatsApp")
-    st.caption("Cada área queda en su propia imagen, con el área como título. Pulsa **Copiar imagen** "
-               "y pégala en WhatsApp con Ctrl+V (o clic derecho sobre la imagen → Copiar imagen).")
+    st.caption("Cada área tiene su título en texto y su imagen. En WhatsApp pega primero la imagen "
+               "(Ctrl+V) y en el cuadro de comentario pega el título. Así el título sale en negrita.")
     for area in areas:
         sub = tabla[tabla["Área sin concepto"] == area].drop(columns=["Área sin concepto"])
         partes = [sub.iloc[i:i + por_img] for i in range(0, len(sub), por_img)]
         for n, parte in enumerate(partes, start=1):
-            t_img = area + (f" · {corte:%d/%m/%Y}" if c_tit else "")
+            t_txt = f"*{area}*" + (f" · {corte:%d/%m/%Y}" if c_tit else "")
             if len(partes) > 1:
-                t_img += f" ({n}/{len(partes)})"
-            png = ct_imagen_tabla(parte, t_img)
+                t_txt += f" ({n}/{len(partes)})"
+            st.code(t_txt, language=None)
+            png = ct_imagen_tabla(parte, t_txt.replace("*", "") if c_tit_img else None)
             st.image(png, width=560)
             b1, b2 = st.columns([3, 2])
             with b1:
@@ -2263,6 +2285,26 @@ def preparar_logo(datos: bytes):
         return f"data:{mime};base64," + base64.b64encode(datos).decode(), 2.5
 
 
+def aclarar(hex_: str, a: float) -> str:
+    h = hex_.lstrip("#")
+    return "#%02x%02x%02x" % tuple(int(round(int(h[i:i + 2], 16) + (255 - int(h[i:i + 2], 16)) * a))
+                                   for i in (0, 2, 4))
+
+
+def degradado(hex_: str, n: int) -> list:
+    """n tonos del mismo color, de más claro (arriba) a más oscuro (abajo)."""
+    h = hex_.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    if n <= 1:
+        return [hex_]
+    salida = []
+    for i in range(n):
+        a = 0.55 - 0.95 * i / (n - 1)          # >0 aclara hacia blanco, <0 oscurece hacia negro
+        mezcla = (lambda c: c + (255 - c) * a) if a >= 0 else (lambda c: c * (1 + a))
+        salida.append("#%02x%02x%02x" % tuple(int(round(mezcla(c))) for c in (r, g, b)))
+    return salida
+
+
 def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_nok,
                regiones=(), region_sel="Todas", escala=1.0, logo_uri=None):
     """Árbol Meta → RFIC OK / RFIC NOK → cajas, con tarjetas clicables. Devuelve (fig, nodos)."""
@@ -2273,8 +2315,8 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
     y_meta = (y_ok + y_nok) / 2
     con_chips = len(regiones) > 1
     y_top = R + (1.75 if con_chips else 0.85)
-    alto = int(max(600, 80 * (R + 1) + 120 + (60 if con_chips else 0) + (150 if logo_uri else 0)) * escala)
-    px_y = (alto - 90 * escala) / (y_top - (-1.75 if logo_uri else 0.15))               # píxeles por unidad vertical (aprox.)
+    alto = int(max(600, 80 * (R + 1) + 120 + (60 if con_chips else 0)) * escala)
+    px_y = (alto - 90 * escala) / (y_top - 0.15)               # píxeles por unidad vertical (aprox.)
     rx, ry = 10 * escala * 100 / 1400, 10 * escala / px_y   # esquinas de ~10 px
     h = 0.84                              # alto de cada tarjeta (unidades y)
 
@@ -2287,6 +2329,14 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
              ("RFIC NOK", "RFIC NOK", n_nok, *PAD, y_nok, 36 * escala)]
     nodos += [(nm, nm, n, *HIJO, y, 30 * escala) for (nm, n), y in zip(hijos_ok, ys_ok)]
     nodos += [(nm, nm, n, *HIJO, y, 30 * escala) for (nm, n), y in zip(hijos_nok, ys_nok)]
+
+    # Las cajas de cada rama van en degradado del color de su padre
+    COL = dict(COLOR_CAJA)
+    TXT = {}
+    for padre, hijos in (("RFIC OK", hijos_ok), ("RFIC NOK", hijos_nok)):
+        for (nm, _n), tono in zip(hijos, degradado(COLOR_CAJA[padre], len(hijos))):
+            COL[nm] = tono
+            TXT[nm] = aclarar(tono, 0.30)   # el texto de las cajas oscuras se mantiene legible
 
     formas, anot, flechas = [], [], []
 
@@ -2307,14 +2357,14 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
     # Conectores
     for clave, yp in (("RFIC OK", y_ok), ("RFIC NOK", y_nok)):
         codo(META[1], y_meta, 26, PAD[0] - 0.4, yp, COLOR_CAJA[clave])
-    for clave, yp, ys in (("RFIC OK", y_ok, ys_ok), ("RFIC NOK", y_nok, ys_nok)):
-        for yh in ys:
-            codo(PAD[1], yp, 58.5, HIJO[0] - 0.4, yh, COLOR_CAJA[clave])
+    for clave, yp, ys, hijos in (("RFIC OK", y_ok, ys_ok, hijos_ok), ("RFIC NOK", y_nok, ys_nok, hijos_nok)):
+        for yh, (nm, _n) in zip(ys, hijos):
+            codo(PAD[1], yp, 58.5, HIJO[0] - 0.4, yh, COL[nm])
 
     # Tarjetas
     xs_clic, ys_clic, claves_clic, textos = [], [], [], []
     for clave, etq, n, x0, x1, y, tam in nodos:
-        col = COLOR_CAJA.get(clave, GRIS)
+        col = COL.get(clave, GRIS)
         ya, yb = y - h / 2, y + h / 2
         formas.append(dict(
             type="path", layer="below",
@@ -2335,7 +2385,7 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
                          font=dict(size=min(tam, 0.36 * h_px), color="#ffffff"),
                          xanchor="left", yanchor="middle"))
         anot.append(dict(x=x0 + 1.4, y=y, yshift=-0.2 * h_px, text=f"<b>{etq}</b>", showarrow=False,
-                         font=dict(size=min(15 * escala, 0.19 * h_px), color=col),
+                         font=dict(size=min(15 * escala, 0.19 * h_px), color=TXT.get(clave, col)),
                          xanchor="left", yanchor="middle"))
         if clave != "Meta":
             anot.append(dict(x=x1 - 1.2, y=y, yshift=0.14 * h_px, text=f"<b>{pc:.0f}%</b>",
@@ -2395,15 +2445,15 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
         paper_bgcolor="#0a0507", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=10, r=10, t=int(84 * escala), b=10),
         showlegend=False, hoverlabel=dict(bgcolor="#2a1a1d", font_size=14, font_color="#ffffff"),
         xaxis=dict(visible=False, range=[0, 100], fixedrange=True),
-        yaxis=dict(visible=False, range=[(-1.75 if logo_uri else 0.15), y_top], fixedrange=True))
+        yaxis=dict(visible=False, range=[0.15, y_top], fixedrange=True))
     if logo_uri:
+        # El logo va en el hueco entre las cajas RFIC OK y RFIC NOK (columna del centro)
         uri, aspecto = logo_uri
-        alto_u = min(112 * escala / px_y, 1.2)               # unidades y (~110 px)
-        ancho_u = min(alto_u * px_y * aspecto * 100 / 1400, 34)
-        alto_u = ancho_u * 1400 / 100 / (px_y * aspecto)
+        y_sup, y_inf = y_ok - h / 2, y_nok + h / 2
         fig.add_layout_image(dict(
-            source=uri, xref="x", yref="y", x=98, y=-1.6, xanchor="right", yanchor="bottom",
-            sizex=ancho_u, sizey=alto_u, sizing="contain", layer="above", opacity=1))
+            source=uri, xref="x", yref="y", x=43.5, y=(y_sup + y_inf) / 2 + 0.1 * (y_sup - y_inf),
+            xanchor="center", yanchor="middle", sizex=27, sizey=0.62 * (y_sup - y_inf),
+            sizing="contain", layer="above", opacity=1))
     fig.add_layout_image(dict(
         source=fondo_oscuro(1400, alto), xref="paper", yref="paper", x=0, y=1, sizex=1, sizey=1,
         xanchor="left", yanchor="top", sizing="stretch", layer="below"))
