@@ -2427,67 +2427,91 @@ def spi_leer(contenido: bytes, mes: int, region: str = "centro", hoja_pref: str 
 
 @st.cache_data(show_spinner=False)
 def spi_imagen(datos: dict, semana_actual: str = ""):
-    """Panel del SPI con el estilo oscuro del gráfico: por semana, «Actual / Plan» y el SPI
-    en una etiqueta de color. Devuelve (uri PNG, proporción ancho/alto)."""
+    """Panel del SPI con el estilo oscuro del gráfico: cada semana tiene sus columnas
+    Plan, Actual y SPI (el SPI en una etiqueta de color). Los anchos se miden con la tipografía
+    disponible, para que nada se encime. Devuelve (uri PNG, proporción ancho/alto)."""
     from PIL import Image, ImageDraw
     S = 2                                           # sobremuestreo para que se vea nítido
-    w_lab, w_sem, h_cab, h_fila, pad = 170, 170, 40, 50, 6
+    f_tit, f_sub = _ct_fuente(21 * S, True), _ct_fuente(14 * S)
+    f_cab, f_men = _ct_fuente(17 * S, True), _ct_fuente(13 * S, True)
+    f_num, f_pl = _ct_fuente(21 * S, True), _ct_fuente(19 * S)
+    f_pil, f_lab = _ct_fuente(15 * S, True), _ct_fuente(16 * S, True)
+    medidor = ImageDraw.Draw(Image.new("RGBA", (4, 4)))
+
+    def ancho(txt, fuente):
+        return medidor.textlength(str(txt), font=fuente) / S
+
+    def fmt(v):
+        return "" if v is None or v == "" else (
+            f"{int(round(v)):,}" if isinstance(v, (int, float)) else str(v))
+
     n = len(datos["semanas"])
     filas = list(datos["filas"].items())
-    W = (w_lab + w_sem * n + 2 * pad) * S
-    H = (h_cab + h_fila * len(filas) + 2 * pad) * S
+    nombre = datos["regional"].replace("_", " ")
+    # anchos de columna según el contenido
+    todos = [v for _, vals in filas for fila in vals for v in fila[:2]]
+    w_pl = max([ancho(fmt(v), f_pl) for v in todos] + [ancho("Plan", f_men)]) + 26
+    w_ac = max([ancho(fmt(v), f_num) for v in todos] + [ancho("Actual", f_men)]) + 26
+    w_sp = max(ancho("100%", f_pil) + 34, ancho("SPI", f_men) + 30)
+    w_gr = w_pl + w_ac + w_sp                       # ancho de cada semana
+    w_lab = max(ancho(f"SPI {datos['mes']}", f_tit), ancho(nombre, f_sub),
+                *(ancho(t, f_lab) for t, _ in filas)) + 28
+    pad, h_sem, h_sub, h_fila = 6, 34, 24, 46
+    W = int((w_lab + w_gr * n + 2 * pad) * S)
+    H = int((h_sem + h_sub + h_fila * len(filas) + 2 * pad) * S)
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    f_tit, f_sub = _ct_fuente(21 * S, True), _ct_fuente(13 * S)
-    f_cab, f_num, f_pl = _ct_fuente(17 * S, True), _ct_fuente(21 * S, True), _ct_fuente(18 * S)
-    f_pil, f_lab = _ct_fuente(16 * S, True), _ct_fuente(16 * S, True)
     BLANCO, MUTE = (255, 255, 255, 255), (205, 188, 190, 255)
     VERDE, AMBAR, ROJO = (27, 175, 122), (242, 176, 30), (255, 90, 77)
-
     d.rounded_rectangle((0, 0, W - 1, H - 1), radius=14 * S, fill=(255, 255, 255, 16),
                         outline=(255, 255, 255, 70), width=S)
-    x_ini, y_ini = pad * S, pad * S
-    # título del panel
-    nombre = datos["regional"].replace("_", " ")
-    d.text((x_ini + 12 * S, y_ini + 12 * S), f"SPI {datos['mes']}", font=f_tit, fill=BLANCO, anchor="lm")
-    d.text((x_ini + 12 * S, y_ini + 31 * S), f"{nombre} · Actual / Plan", font=f_sub, fill=MUTE, anchor="lm")
-    # cabecera de semanas
+    x0, y0 = pad * S, pad * S
+    y_datos = y0 + (h_sem + h_sub) * S
+    # título del panel (columna izquierda, sobre las cabeceras)
+    d.text((x0 + 14 * S, y0 + (h_sem + h_sub) * S * 0.36), f"SPI {datos['mes']}", font=f_tit,
+           fill=BLANCO, anchor="lm")
+    d.text((x0 + 14 * S, y0 + (h_sem + h_sub) * S * 0.70), nombre, font=f_sub, fill=MUTE, anchor="lm")
+    d.line((x0 + 10 * S, y_datos, W - x0 - 10 * S, y_datos), fill=(255, 255, 255, 60), width=S)
+
     for k, sem in enumerate(datos["semanas"]):
-        x0 = x_ini + (w_lab + w_sem * k) * S
-        cx, cy = x0 + w_sem * S // 2, y_ini + h_cab * S // 2
+        gx = x0 + (w_lab + w_gr * k) * S                          # inicio del grupo de la semana
+        c_pl = gx + w_pl * S // 2
+        c_ac = gx + (w_pl + w_ac // 2) * S
+        c_sp = gx + int((w_pl + w_ac + w_sp / 2) * S)
+        # separador vertical de la semana
+        d.line((gx, y0 + 8 * S, gx, H - y0 - 8 * S), fill=(255, 255, 255, 55), width=S)
+        # cabecera: semana y subtítulos
+        cx, cy = gx + w_gr * S // 2, y0 + h_sem * S // 2
         if sem == semana_actual:
-            d.rounded_rectangle((cx - 34 * S, cy - 14 * S, cx + 34 * S, cy + 14 * S), radius=14 * S,
+            d.rounded_rectangle((cx - 36 * S, cy - 14 * S, cx + 36 * S, cy + 14 * S), radius=14 * S,
                                 fill=(226, 35, 26, 255), outline=(255, 255, 255, 220), width=S)
             d.text((cx, cy), sem, font=f_cab, fill=BLANCO, anchor="mm")
         else:
             d.text((cx, cy), sem, font=f_cab, fill=MUTE, anchor="mm")
-    # separadores verticales entre semanas
-    for k in range(n):
-        xs = x_ini + (w_lab + w_sem * k) * S
-        d.line((xs, y_ini + 8 * S, xs, H - y_ini - 8 * S), fill=(255, 255, 255, 38), width=S)
-    # filas
-    for fi, (tipo, vals) in enumerate(filas):
-        y0 = y_ini + (h_cab + h_fila * fi) * S
-        cy = y0 + h_fila * S // 2
-        d.line((x_ini + 10 * S, y0, W - x_ini - 10 * S, y0), fill=(255, 255, 255, 40), width=S)
-        d.text((x_ini + 12 * S, cy), tipo, font=f_lab, fill=BLANCO, anchor="lm")
-        for k, (pl, ac, spi) in enumerate(vals):
-            x0 = x_ini + (w_lab + w_sem * k) * S
-            fmt = lambda v: "" if v is None or v == "" else (  # noqa: E731
-                f"{int(round(v)):,}" if isinstance(v, (int, float)) else str(v))
-            t_ac, t_pl = fmt(ac), f" / {fmt(pl)}"
-            d.text((x0 + 8 * S, cy), t_ac, font=f_num, fill=BLANCO, anchor="lm")
-            ancho_ac = d.textlength(t_ac, font=f_num)
-            d.text((x0 + 8 * S + ancho_ac, cy + 1 * S), t_pl, font=f_pl, fill=MUTE, anchor="lm")
+        ys = y0 + (h_sem + h_sub // 2) * S
+        d.text((c_pl, ys), "Plan", font=f_men, fill=MUTE, anchor="mm")
+        d.text((c_ac, ys), "Actual", font=f_men, fill=(255, 170, 160, 255), anchor="mm")
+        d.text((c_sp, ys), "SPI", font=f_men, fill=MUTE, anchor="mm")
+        # datos
+        for fi, (tipo, vals) in enumerate(filas):
+            pl, ac, spi = vals[k]
+            cy = y_datos + (fi * h_fila + h_fila // 2) * S
+            d.text((c_pl, cy), fmt(pl), font=f_pl, fill=MUTE, anchor="mm")
+            d.text((c_ac, cy), fmt(ac), font=f_num, fill=BLANCO, anchor="mm")
             if isinstance(spi, (int, float)):
                 col = VERDE if spi >= 1 else AMBAR if spi >= 0.9 else ROJO
-                txt = f"{spi * 100:.0f}%"
-                pw, ph = 52 * S, 24 * S
-                px1 = x0 + w_sem * S - 8 * S
-                d.rounded_rectangle((px1 - pw, cy - ph // 2, px1, cy + ph // 2), radius=ph // 2,
-                                    fill=col + (70,), outline=col + (255,), width=S)
+                pw, ph = int((w_sp - 16) * S), 26 * S
+                d.rounded_rectangle((c_sp - pw // 2, cy - ph // 2, c_sp + pw // 2, cy + ph // 2),
+                                    radius=ph // 2, fill=col + (70,), outline=col + (255,), width=S)
                 claro = tuple(int(c + (255 - c) * 0.55) for c in col)
-                d.text((px1 - pw // 2, cy), txt, font=f_pil, fill=claro + (255,), anchor="mm")
+                d.text((c_sp, cy), f"{spi * 100:.0f}%", font=f_pil, fill=claro + (255,), anchor="mm")
+    # etiquetas de fila y separadores horizontales
+    for fi, (tipo, _) in enumerate(filas):
+        cy = y_datos + (fi * h_fila + h_fila // 2) * S
+        d.text((x0 + 14 * S, cy), tipo, font=f_lab, fill=BLANCO, anchor="lm")
+        if fi > 0:
+            yl = y_datos + fi * h_fila * S
+            d.line((x0 + 10 * S, yl, W - x0 - 10 * S, yl), fill=(255, 255, 255, 38), width=S)
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return ("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(), W / H)
