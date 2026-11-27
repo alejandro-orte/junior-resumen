@@ -2426,74 +2426,71 @@ def spi_leer(contenido: bytes, mes: int, region: str = "centro", hoja_pref: str 
 
 
 @st.cache_data(show_spinner=False)
-def spi_imagen(datos: dict):
-    """Cuadro del SPI con el mismo estilo del Excel. Devuelve (uri PNG, proporción ancho/alto)."""
+def spi_imagen(datos: dict, semana_actual: str = ""):
+    """Panel del SPI con el estilo oscuro del gráfico: por semana, «Actual / Plan» y el SPI
+    en una etiqueta de color. Devuelve (uri PNG, proporción ancho/alto)."""
     from PIL import Image, ImageDraw
     S = 2                                           # sobremuestreo para que se vea nítido
-    w_reg, w_pro, w_tip, w_met, alto = 150, 118, 108, 56, 30
+    w_lab, w_sem, h_cab, h_fila, pad = 170, 170, 40, 50, 6
     n = len(datos["semanas"])
-    ancho = (w_reg + w_pro + w_tip + 3 * w_met * n) * S
     filas = list(datos["filas"].items())
-    img = Image.new("RGB", (ancho, (3 + len(filas)) * alto * S + 2), "white")
+    W = (w_lab + w_sem * n + 2 * pad) * S
+    H = (h_cab + h_fila * len(filas) + 2 * pad) * S
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    f_b, f_n, f_s = _ct_fuente(17 * S, True), _ct_fuente(17 * S), _ct_fuente(16 * S, True)
-    GRIS, ROJO, AZUL, AMAR, BORDE = (127, 127, 127), (192, 0, 0), (68, 84, 106), (255, 230, 153), (191, 191, 191)
-    izq = (w_reg + w_pro + w_tip) * S
+    f_tit, f_sub = _ct_fuente(21 * S, True), _ct_fuente(13 * S)
+    f_cab, f_num, f_pl = _ct_fuente(17 * S, True), _ct_fuente(21 * S, True), _ct_fuente(18 * S)
+    f_pil, f_lab = _ct_fuente(16 * S, True), _ct_fuente(16 * S, True)
+    BLANCO, MUTE = (255, 255, 255, 255), (205, 188, 190, 255)
+    VERDE, AMBAR, ROJO = (27, 175, 122), (242, 176, 30), (255, 90, 77)
 
-    def celda(x0, y0, x1, y1, fondo="white", texto=None, fuente=f_n, color="black", alin="c", dx=0):
-        d.rectangle((x0, y0, x1, y1), fill=fondo, outline=BORDE)
-        if texto is not None and texto != "":
-            cx = (x0 + x1) // 2 + dx if alin == "c" else x0 + 8 * S
-            d.text((cx, (y0 + y1) // 2), str(texto), font=fuente, fill=color,
-                   anchor="mm" if alin == "c" else "lm")
-
-    def filtro(x1, y0):
-        bx, by = x1 - 17 * S, y0 + 8 * S
-        d.rectangle((bx, by, bx + 12 * S, by + 14 * S), fill=(240, 240, 240), outline=(170, 170, 170))
-        d.polygon([(bx + 3 * S, by + 5 * S), (bx + 9 * S, by + 5 * S), (bx + 6 * S, by + 9 * S)],
-                  fill=(60, 60, 60))
-
-    h = alto * S
-    # fila 0: mes (solo sobre las semanas)
-    celda(izq, 0, ancho - 1, h, GRIS, datos["mes"], f_b, "white")
-    # fila 1: Plan / Actual / SPI
-    for k in range(n):
-        for j, (txt, col) in enumerate((("Plan", GRIS), ("Actual", ROJO), ("SPI", GRIS))):
-            x0 = izq + (3 * k + j) * w_met * S
-            celda(x0, h, x0 + w_met * S, 2 * h, col, txt, f_b, "white")
-    # fila 2: encabezados de la izquierda y semanas
-    for x0, w_, txt in ((0, w_reg, "Regional"), (w_reg * S, w_pro, "Proyecto"),
-                        ((w_reg + w_pro) * S, w_tip, "Tipo")):
-        celda(x0, 2 * h, x0 + w_ * S, 3 * h, "white", txt, f_b, "black", dx=-7 * S)
-        filtro(x0 + w_ * S, 2 * h)
+    d.rounded_rectangle((0, 0, W - 1, H - 1), radius=14 * S, fill=(255, 255, 255, 16),
+                        outline=(255, 255, 255, 70), width=S)
+    x_ini, y_ini = pad * S, pad * S
+    # título del panel
+    nombre = datos["regional"].replace("_", " ")
+    d.text((x_ini + 12 * S, y_ini + 12 * S), f"SPI {datos['mes']}", font=f_tit, fill=BLANCO, anchor="lm")
+    d.text((x_ini + 12 * S, y_ini + 31 * S), f"{nombre} · Actual / Plan", font=f_sub, fill=MUTE, anchor="lm")
+    # cabecera de semanas
     for k, sem in enumerate(datos["semanas"]):
-        for j in range(3):
-            x0 = izq + (3 * k + j) * w_met * S
-            celda(x0, 2 * h, x0 + w_met * S, 3 * h, AZUL, sem, f_s, "white", dx=-7 * S)
-            filtro(x0 + w_met * S, 2 * h)
-    # filas de datos
+        x0 = x_ini + (w_lab + w_sem * k) * S
+        cx, cy = x0 + w_sem * S // 2, y_ini + h_cab * S // 2
+        if sem == semana_actual:
+            d.rounded_rectangle((cx - 34 * S, cy - 14 * S, cx + 34 * S, cy + 14 * S), radius=14 * S,
+                                fill=(226, 35, 26, 255), outline=(255, 255, 255, 220), width=S)
+            d.text((cx, cy), sem, font=f_cab, fill=BLANCO, anchor="mm")
+        else:
+            d.text((cx, cy), sem, font=f_cab, fill=MUTE, anchor="mm")
+    # separadores verticales entre semanas
+    for k in range(n):
+        xs = x_ini + (w_lab + w_sem * k) * S
+        d.line((xs, y_ini + 8 * S, xs, H - y_ini - 8 * S), fill=(255, 255, 255, 38), width=S)
+    # filas
     for fi, (tipo, vals) in enumerate(filas):
-        y0 = (3 + fi) * h
-        fondo = AMAR if tipo == "Semanal" else "white"
-        for x0, w_, txt in ((0, w_reg, datos["regional"]), (w_reg * S, w_pro, datos["proyecto"]),
-                            ((w_reg + w_pro) * S, w_tip, tipo)):
-            celda(x0, y0, x0 + w_ * S, y0 + h, fondo, txt, f_n, "black")
+        y0 = y_ini + (h_cab + h_fila * fi) * S
+        cy = y0 + h_fila * S // 2
+        d.line((x_ini + 10 * S, y0, W - x_ini - 10 * S, y0), fill=(255, 255, 255, 40), width=S)
+        d.text((x_ini + 12 * S, cy), tipo, font=f_lab, fill=BLANCO, anchor="lm")
         for k, (pl, ac, spi) in enumerate(vals):
-            for j, v in enumerate((pl, ac, spi)):
-                if v is None or v == "":
-                    t = ""
-                elif j == 2 and isinstance(v, (int, float)):
-                    t = f"{v * 100:.0f}%"
-                elif isinstance(v, float) and v == int(v):
-                    t = f"{int(v)}"
-                else:
-                    t = f"{v:,.0f}" if isinstance(v, (int, float)) else str(v)
-                x0 = izq + (3 * k + j) * w_met * S
-                celda(x0, y0, x0 + w_met * S, y0 + h, "white", t, f_n, "black")
+            x0 = x_ini + (w_lab + w_sem * k) * S
+            fmt = lambda v: "" if v is None or v == "" else (  # noqa: E731
+                f"{int(round(v)):,}" if isinstance(v, (int, float)) else str(v))
+            t_ac, t_pl = fmt(ac), f" / {fmt(pl)}"
+            d.text((x0 + 8 * S, cy), t_ac, font=f_num, fill=BLANCO, anchor="lm")
+            ancho_ac = d.textlength(t_ac, font=f_num)
+            d.text((x0 + 8 * S + ancho_ac, cy + 1 * S), t_pl, font=f_pl, fill=MUTE, anchor="lm")
+            if isinstance(spi, (int, float)):
+                col = VERDE if spi >= 1 else AMBAR if spi >= 0.9 else ROJO
+                txt = f"{spi * 100:.0f}%"
+                pw, ph = 52 * S, 24 * S
+                px1 = x0 + w_sem * S - 8 * S
+                d.rounded_rectangle((px1 - pw, cy - ph // 2, px1, cy + ph // 2), radius=ph // 2,
+                                    fill=col + (70,), outline=col + (255,), width=S)
+                claro = tuple(int(c + (255 - c) * 0.55) for c in col)
+                d.text((px1 - pw // 2, cy), txt, font=f_pil, fill=claro + (255,), anchor="mm")
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
-    return ("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(),
-            img.size[0] / img.size[1])
+    return ("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(), W / H)
 
 
 def aclarar(hex_: str, a: float) -> str:
@@ -2526,7 +2523,7 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
     y_meta = (y_ok + y_nok) / 2
     con_chips = len(regiones) > 1
     y_top = R + (1.75 if con_chips else 0.85)
-    extra_t = 50 if spi_uri else 0         # espacio extra arriba para el cuadro SPI
+    extra_t = 66 if spi_uri else 0         # espacio extra arriba para el cuadro SPI
     alto = int(max(600, 80 * (R + 1) + 120 + (60 if con_chips else 0)) * escala) + int(extra_t * escala)
     px_y = (alto - (90 + extra_t) * escala) / (y_top - 0.15)               # píxeles por unidad vertical (aprox.)
     rx, ry = 10 * escala * 100 / 1400, 10 * escala / px_y   # esquinas de ~10 px
@@ -2765,7 +2762,7 @@ with tab_p:
             try:
                 _mes_hoy = datetime.datetime.now(ZoneInfo("America/Bogota")).month
                 _spi_d = spi_leer(f_spi.getvalue(), _mes_hoy, "centro")
-                spi_uri = spi_imagen(_spi_d)
+                spi_uri = spi_imagen(_spi_d, f"W{datetime.datetime.now(ZoneInfo('America/Bogota')).isocalendar()[1]}")
                 if not presentacion:
                     st.caption(f"📈 Cuadro SPI: {_spi_d['regional']} · {_spi_d['mes']} · "
                                f"archivo {f_spi.name}. Reemplaza al título del gráfico.")
