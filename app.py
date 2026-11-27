@@ -62,7 +62,7 @@ GRIS = "#8a8984"
 st.markdown(
     """
     <style>
-      .block-container {padding-top: 1.6rem; padding-bottom: 2rem;}
+      .block-container {padding-top: 4.2rem; padding-bottom: 2rem;}
       .kpi {
         border: 1px solid rgba(128,128,128,.25);
         border-radius: 12px;
@@ -1462,22 +1462,26 @@ def _ct_fuente(tam: int, negrita: bool = False):
     return ImageFont.load_default()
 
 
+CT_ANCHO_COL = {"Sitio": 430, "Días hábiles": 250, "Área sin concepto": 300, "Territorio": 310}
+
+
 def ct_imagen_tabla(tabla: pd.DataFrame, titulo: str | None = None) -> bytes:
     """Tabla estilo Excel (encabezado azul, filas alternadas) como PNG para WhatsApp."""
     from PIL import Image, ImageDraw
-    anchos = [430, 250, 300, 310]
+    cols = list(tabla.columns)
+    anchos = [CT_ANCHO_COL.get(c, 300) for c in cols]
     alto_fila, alto_enc = 58, 62
-    alto_tit = 70 if titulo else 0
+    alto_tit = 76 if titulo else 0
     ancho = sum(anchos)
     img = Image.new("RGB", (ancho, alto_tit + alto_enc + alto_fila * len(tabla) + 2), "white")
     d = ImageDraw.Draw(img)
-    f_enc, f_txt, f_tit = _ct_fuente(28, True), _ct_fuente(27), _ct_fuente(32, True)
+    f_enc, f_txt, f_tit = _ct_fuente(28, True), _ct_fuente(27), _ct_fuente(38, True)
     if titulo:
         d.text((16, alto_tit // 2), titulo, font=f_tit, fill=(31, 56, 100), anchor="lm")
     y0 = alto_tit
     d.rectangle((0, y0, ancho, y0 + alto_enc), fill=(0, 112, 192))
     x = 0
-    for nombre, w in zip(tabla.columns, anchos):
+    for nombre, w in zip(cols, anchos):
         d.text((x + w // 2 - 14, y0 + alto_enc // 2), nombre, font=f_enc, fill="white", anchor="mm")
         bx = x + w - 44  # botón de filtro, como en Excel
         d.rectangle((bx, y0 + 16, bx + 30, y0 + 46), fill=(240, 240, 240), outline=(190, 190, 190))
@@ -1488,21 +1492,65 @@ def ct_imagen_tabla(tabla: pd.DataFrame, titulo: str | None = None) -> bytes:
         d.rectangle((0, y, ancho, y + alto_fila), fill=(221, 235, 247) if i % 2 == 0 else "white")
         d.line((0, y + alto_fila, ancho, y + alto_fila), fill=(200, 215, 230), width=1)
         x = 0
-        for k, (valor, w) in enumerate(zip(fila, anchos)):
+        for nombre, valor, w in zip(cols, fila, anchos):
             txt = str(valor)
             cy = y + alto_fila // 2
-            if k == 1:
+            if nombre == "Días hábiles":
                 d.text((x + w - 96, cy), txt, font=f_txt, fill="black", anchor="rm")
-            elif k == 3:
-                d.text((x + w // 2, cy), txt, font=f_txt, fill="black", anchor="mm")
-            else:
+            elif nombre == "Sitio":
                 d.text((x + 12, cy), txt, font=f_txt, fill="black", anchor="lm")
+            else:
+                d.text((x + w // 2, cy), txt, font=f_txt, fill="black", anchor="mm")
             x += w
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
 
 
+def ct_boton_copiar(png: bytes):
+    """Botón que copia la imagen al portapapeles para pegarla directo en WhatsApp."""
+    try:
+        import streamlit.components.v1 as components
+        b64 = base64.b64encode(png).decode()
+        components.html(
+            """<style>button{font:14px sans-serif;padding:7px 14px;border:1px solid #bbb;
+            border-radius:8px;background:#fff;cursor:pointer}button:hover{background:#f3f3f3}
+            span{font:13px sans-serif;margin-left:10px;color:#444}</style>
+            <button id="b">📋 Copiar imagen</button><span id="m"></span>
+            <script>
+            var b64="%s", m=document.getElementById('m');
+            document.getElementById('b').onclick=async function(){
+              try{
+                var bin=atob(b64), u=new Uint8Array(bin.length);
+                for(var i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);
+                await navigator.clipboard.write([new ClipboardItem({'image/png':
+                  new Blob([u],{type:'image/png'})})]);
+                m.textContent='Copiada. Pégala en WhatsApp con Ctrl+V';
+              }catch(e){
+                m.textContent='No se pudo copiar aquí: clic derecho en la imagen → Copiar imagen';
+              }
+            };
+            </script>""" % b64, height=46)
+    except Exception:  # noqa: BLE001
+        st.caption("Clic derecho sobre la imagen → Copiar imagen.")
+
+
+def ct_tabla_html(tabla: pd.DataFrame) -> str:
+    """Tabla HTML (texto seleccionable) para copiar y pegar en Excel."""
+    import html as _h
+    th = "".join(f"<th>{_h.escape(str(c))}</th>" for c in tabla.columns)
+    filas = "".join("<tr>" + "".join(f"<td>{_h.escape(str(v))}</td>" for v in f) + "</tr>"
+                    for f in tabla.itertuples(index=False))
+    return (f"<table class='ctx'><thead><tr>{th}</tr></thead><tbody>{filas}</tbody></table>")
+
+
+def ct_texto_whatsapp(tabla: pd.DataFrame, area: str) -> str:
+    """Versión en texto con formato de WhatsApp (negrita y monoespaciado)."""
+    cols = [c for c in tabla.columns if c != "Área sin concepto"]
+    filas = [[str(v) for v in f] for f in tabla[cols].itertuples(index=False)]
+    w = [max(len(c), *(len(f[i]) for f in filas)) for i, c in enumerate(cols)]
+    lin = lambda f: "  ".join(x.ljust(w[i]) for i, x in enumerate(f)).rstrip()  # noqa: E731
+    return f"*{area}*\n```\n" + "\n".join([lin(cols)] + [lin(f) for f in filas]) + "\n```"
 
 
 def pantalla_concepto_tss():
@@ -1551,7 +1599,7 @@ def pantalla_concepto_tss():
                           index=(regiones.index("Centro") + 1) if "Centro" in regiones else 0)
     corte = o2.date_input("Fecha de corte", hoy, help="Los días hábiles se cuentan hasta esta fecha.")
     solo_fuera = o3.checkbox("Solo fuera de ventana (más de 5 días hábiles)", value=False)
-    c_tit = st.checkbox("Agregar título y fecha en la imagen", value=False)
+    c_tit = st.checkbox("Agregar la fecha de corte al título de cada imagen", value=False)
     por_img = st.slider("Filas por imagen", 10, 60, 30, help="Si hay más filas, se parte en varias "
                                                              "imágenes para que se lean bien en WhatsApp.")
 
@@ -1572,7 +1620,6 @@ def pantalla_concepto_tss():
     st.caption("Por área: " + " · ".join(f"**{a}** {int(n)}" for a, n in
                                           por_area.reindex([a for a in CT_ORDEN_AREA if a in por_area.index]
                                                            + [a for a in por_area.index if a not in CT_ORDEN_AREA]).items()))
-    st.dataframe(tabla, hide_index=True, width="stretch", height=min(40 + 35 * len(tabla), 520))
 
     if ES_ADMIN and (subido_rep is not None or subido_bl is not None):
         ent = {}
@@ -1585,21 +1632,49 @@ def pantalla_concepto_tss():
         bloque_publicar({}, {})
 
     titulo = f"Concepto TSS · {region} · {corte:%d/%m/%Y}"
+    areas = ([a for a in CT_ORDEN_AREA if a in por_area.index]
+             + [a for a in por_area.index if a not in CT_ORDEN_AREA])
+
+    st.subheader("Para pegar en WhatsApp")
+    st.caption("Cada área queda en su propia imagen, con el área como título. Pulsa **Copiar imagen** "
+               "y pégala en WhatsApp con Ctrl+V (o clic derecho sobre la imagen → Copiar imagen).")
+    for area in areas:
+        sub = tabla[tabla["Área sin concepto"] == area].drop(columns=["Área sin concepto"])
+        partes = [sub.iloc[i:i + por_img] for i in range(0, len(sub), por_img)]
+        for n, parte in enumerate(partes, start=1):
+            t_img = area + (f" · {corte:%d/%m/%Y}" if c_tit else "")
+            if len(partes) > 1:
+                t_img += f" ({n}/{len(partes)})"
+            png = ct_imagen_tabla(parte, t_img)
+            st.image(png, width=560)
+            b1, b2 = st.columns([3, 2])
+            with b1:
+                ct_boton_copiar(png)
+            b2.download_button("⬇️ Descargar PNG", png, file_name=f"concepto_tss_{_plano(area).replace(' ', '_')}_{n}.png",
+                               mime="image/png", key=f"png_{_plano(area)}_{n}")
+
+    with st.expander("📋 Ver como tabla (para copiar y pegar en Excel)"):
+        st.markdown("<style>table.ctx{border-collapse:collapse;width:100%;font-size:14px}"
+                    "table.ctx th{background:#0070c0;color:#fff;padding:6px 10px;text-align:center}"
+                    "table.ctx td{padding:5px 10px;text-align:center;color:#111}"
+                    "table.ctx td:first-child,table.ctx th:first-child{text-align:left}"
+                    "table.ctx tr:nth-child(even) td{background:#ddebf7}"
+                    "table.ctx tr:nth-child(odd) td{background:#fff}</style>", unsafe_allow_html=True)
+        for area in areas:
+            sub = tabla[tabla["Área sin concepto"] == area].drop(columns=["Área sin concepto"])
+            st.markdown(f"**{area}** · {len(sub)} sitios")
+            st.markdown(ct_tabla_html(sub), unsafe_allow_html=True)
+
+    with st.expander("💬 Versión en texto para WhatsApp"):
+        st.caption("Con el ícono de copiar de la esquina. WhatsApp muestra el área en negrita y la "
+                   "tabla en letra monoespaciada.")
+        for area in areas:
+            st.code(ct_texto_whatsapp(tabla[tabla["Área sin concepto"] == area], area), language=None)
+
     st.subheader("Descargas")
-    d1, d2 = st.columns(2)
-    d1.download_button("⬇️ Descargar Excel", ct_excel_bytes(tabla, titulo),
+    st.download_button("⬇️ Descargar Excel", ct_excel_bytes(tabla, titulo),
                        file_name=f"concepto_tss_{_plano(region).replace(' ', '_')}_{corte:%Y%m%d}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    partes = [tabla.iloc[i:i + por_img] for i in range(0, len(tabla), por_img)]
-    st.markdown("**Imagen para WhatsApp**" + (f" · {len(partes)} imágenes" if len(partes) > 1 else ""))
-    for n, parte in enumerate(partes, start=1):
-        t_img = (titulo + (f" ({n}/{len(partes)})" if len(partes) > 1 else "")) if c_tit else None
-        png = ct_imagen_tabla(parte, t_img)
-        st.image(png, width=640)
-        st.download_button(f"⬇️ Descargar imagen{f' {n}' if len(partes) > 1 else ''} (PNG)", png,
-                           file_name=f"concepto_tss_{n}.png", mime="image/png", key=f"png_{n}")
-
 
 
 # ---------------------------------------------------------------------------
@@ -1705,7 +1780,7 @@ with st.sidebar:
              "• Fecha en la columna RFIC: el criterio anterior.\n"
              "No aplica a la vista «Resumen del Excel», que muestra los valores tal cual.")
 
-_t1, _t2 = st.columns([4, 1])
+_t1, _t2 = st.columns([4, 1], vertical_alignment="center")
 _t1.title("📡 Dashboard Resumen · Modernización")
 presentacion = _t2.toggle("🎞️ Modo presentación", key="presentacion",
                           help="Oculta la barra lateral, las ayudas y los botones para "
