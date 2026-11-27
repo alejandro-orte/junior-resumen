@@ -9,7 +9,7 @@
   "rf": "4413e3dce0",
   "baseline": "15f7ee2be7",
   "concepto": "4ce3b1057f",
-  "spi": "0d734b6198"
+  "spi": "07f489f497"
  },
  "origen": {
   "rf": {
@@ -26,12 +26,12 @@
   },
   "spi": {
    "archivo": "SPI LTE Sitios Existentes 2026_W47.xlsx",
-   "modificado": "27/11/2026 15:37"
+   "modificado": "27/11/2026 15:38"
   }
  },
  "modo": "archivos",
  "proyecto": "MODERNIZACION_2026",
  "region": "R4",
- "publicado": "27/11/2026 15:37",
- "solicitud": "9eebf383e6"
+ "publicado": "27/11/2026 15:38",
+ "solicitud": "a8a3602409"
 }
