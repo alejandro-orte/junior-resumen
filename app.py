@@ -1004,6 +1004,7 @@ def panel_detalle(prefijo):
 # Datos publicados: quien administra sube los archivos una vez y los demás solo ven
 # ---------------------------------------------------------------------------
 DIR_PUB = Path(__file__).parent / "datos_publicados"
+RUTA_GH = "datos_publicados"
 
 
 @st.cache_resource
@@ -1025,6 +1026,54 @@ def _ahora() -> str:
     return datetime.datetime.now(ZoneInfo("America/Bogota")).strftime("%d/%m/%Y %H:%M")
 
 
+# --- GitHub como almacén (rama aparte: no reinicia la app al guardar) -----------------
+def gh_cfg():
+    """Configuración de GitHub desde los Secrets; None si no está configurado."""
+    try:
+        tok, repo = st.secrets.get("GITHUB_TOKEN"), st.secrets.get("GITHUB_REPO")
+        if not tok or not repo:
+            return None
+        return {"token": tok, "repo": repo, "rama": st.secrets.get("GITHUB_RAMA_DATOS", "datos"),
+                "api": st.secrets.get("GITHUB_API", "https://api.github.com")}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _gh(cfg, metodo, ruta, crudo=False, **kw):
+    import requests
+    h = {"Authorization": f"Bearer {cfg['token']}", "X-GitHub-Api-Version": "2022-11-28",
+         "Accept": "application/vnd.github.raw+json" if crudo else "application/vnd.github+json"}
+    return requests.request(metodo, f"{cfg['api']}/repos/{cfg['repo']}/{ruta}", headers=h,
+                            timeout=120, **kw)
+
+
+def gh_leer(cfg, ruta):
+    r = _gh(cfg, "GET", f"contents/{ruta}", crudo=True, params={"ref": cfg["rama"]})
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    return r.content
+
+
+def gh_asegurar_rama(cfg):
+    r = _gh(cfg, "GET", f"git/ref/heads/{cfg['rama']}")
+    if r.status_code == 200:
+        return
+    base = _gh(cfg, "GET", "").json().get("default_branch", "main")
+    sha = _gh(cfg, "GET", f"git/ref/heads/{base}").json()["object"]["sha"]
+    _gh(cfg, "POST", "git/refs", json={"ref": f"refs/heads/{cfg['rama']}", "sha": sha}
+        ).raise_for_status()
+
+
+def gh_escribir(cfg, ruta, datos: bytes, mensaje: str):
+    r = _gh(cfg, "GET", f"contents/{ruta}", params={"ref": cfg["rama"]})
+    cuerpo = {"message": mensaje, "content": base64.b64encode(datos).decode(),
+              "branch": cfg["rama"]}
+    if r.status_code == 200:
+        cuerpo["sha"] = r.json().get("sha")
+    _gh(cfg, "PUT", f"contents/{ruta}", json=cuerpo).raise_for_status()
+
+
 def _decodificar_pub(b: bytes) -> str:
     try:
         return b.decode("utf-8-sig")
@@ -1033,7 +1082,18 @@ def _decodificar_pub(b: bytes) -> str:
 
 
 def pub_meta() -> dict:
+    import time
     mem = _memoria_pub()
+    cfg = gh_cfg()
+    if cfg:
+        if time.time() - mem.get("_t", 0) > 20:  # se refresca desde GitHub cada 20 s
+            try:
+                crudo = gh_leer(cfg, f"{RUTA_GH}/meta.json")
+                mem["meta"] = json.loads(crudo) if crudo else {}
+            except Exception:  # noqa: BLE001
+                mem.setdefault("meta", {})
+            mem["_t"] = time.time()
+        return mem.get("meta", {})
     if "meta" in mem:
         return mem["meta"]
     try:
@@ -1044,44 +1104,74 @@ def pub_meta() -> dict:
 
 
 def pub_archivo(clave):
-    nombre = pub_meta().get("archivos", {}).get(clave)
+    meta = pub_meta()
+    nombre = meta.get("archivos", {}).get(clave)
     if not nombre:
         return None
     mem = _memoria_pub()
-    datos = mem.get(clave)
+    version = f"{meta.get('publicado', '')}|{meta.get('versiones', {}).get(clave, '')}|{nombre}"
+    guardado = mem.get("f_" + clave)
+    if guardado and guardado[0] == version:
+        return ArchivoPub(nombre, guardado[1])
+    datos = None
+    cfg = gh_cfg()
+    try:
+        if cfg:
+            datos = gh_leer(cfg, f"{RUTA_GH}/{nombre}")
+        else:
+            datos = mem.get(clave) or (DIR_PUB / nombre).read_bytes()
+    except Exception:  # noqa: BLE001
+        datos = None
     if datos is None:
-        try:
-            datos = (DIR_PUB / nombre).read_bytes()
-        except Exception:  # noqa: BLE001
-            return None
-        mem[clave] = datos
+        return None
+    mem["f_" + clave] = (version, datos)
     return ArchivoPub(nombre, datos)
 
 
 def pub_guardar(entradas: dict, extra: dict):
-    """entradas: {clave: (nombre_original, bytes)}. Guarda en memoria y, si se puede, en disco."""
+    """entradas: {clave: (nombre_original, bytes)}. Con GitHub configurado se guarda allí
+    (queda permanente); si no, en memoria y en disco (se pierde al reiniciar la app)."""
+    import hashlib
     mem = _memoria_pub()
     meta = json.loads(json.dumps(pub_meta())) if pub_meta() else {}
     meta.setdefault("archivos", {})
+    meta.setdefault("versiones", {})
+    cfg = gh_cfg()
     aviso = None
-    try:
-        DIR_PUB.mkdir(exist_ok=True)
-    except Exception as e:  # noqa: BLE001
-        aviso = str(e)
-    for clave, (nombre, datos) in entradas.items():
-        guardado = f"{clave}{Path(nombre).suffix.lower() or '.dat'}"
-        mem[clave] = datos
-        meta["archivos"][clave] = guardado
+    if cfg:
         try:
-            (DIR_PUB / guardado).write_bytes(datos)
+            gh_asegurar_rama(cfg)
+        except Exception as e:  # noqa: BLE001
+            return f"No pude preparar la rama de datos en GitHub: {e}"
+    else:
+        try:
+            DIR_PUB.mkdir(exist_ok=True)
         except Exception as e:  # noqa: BLE001
             aviso = str(e)
+    for clave, (nombre, datos) in entradas.items():
+        guardado = f"{clave}{Path(nombre).suffix.lower() or '.dat'}"
+        meta["archivos"][clave] = guardado
+        meta["versiones"][clave] = hashlib.sha1(datos).hexdigest()[:10]
+        try:
+            if cfg:
+                gh_escribir(cfg, f"{RUTA_GH}/{guardado}", datos, f"Datos publicados: {guardado}")
+            else:
+                (DIR_PUB / guardado).write_bytes(datos)
+        except Exception as e:  # noqa: BLE001
+            aviso = f"{guardado}: {e}"
     meta.update(extra)
     meta["publicado"] = _ahora()
+    for clave in entradas:
+        mem.pop("f_" + clave, None)
+        mem[clave] = entradas[clave][1]
     mem["meta"] = meta
+    mem["_t"] = __import__("time").time()
+    texto = json.dumps(meta, ensure_ascii=False, indent=1).encode("utf-8")
     try:
-        (DIR_PUB / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1),
-                                           encoding="utf-8")
+        if cfg:
+            gh_escribir(cfg, f"{RUTA_GH}/meta.json", texto, "Datos publicados")
+        else:
+            (DIR_PUB / "meta.json").write_bytes(texto)
     except Exception as e:  # noqa: BLE001
         aviso = str(e)
     return aviso
@@ -1089,18 +1179,60 @@ def pub_guardar(entradas: dict, extra: dict):
 
 def pub_borrar():
     mem = _memoria_pub()
-    for clave in list(pub_meta().get("archivos", {})):
-        nombre = pub_meta()["archivos"][clave]
+    cfg = gh_cfg()
+    if cfg:
         try:
-            (DIR_PUB / nombre).unlink()
+            gh_escribir(cfg, f"{RUTA_GH}/meta.json", b"{}", "Datos publicados quitados")
         except Exception:  # noqa: BLE001
             pass
-    try:
-        (DIR_PUB / "meta.json").unlink()
-    except Exception:  # noqa: BLE001
-        pass
+    else:
+        for nombre in list(pub_meta().get("archivos", {}).values()) + ["meta.json"]:
+            try:
+                (DIR_PUB / nombre).unlink()
+            except Exception:  # noqa: BLE001
+                pass
     mem.clear()
     mem["meta"] = {}
+    mem["_t"] = __import__("time").time()
+
+
+def solicitar_actualizacion():
+    """Pide al computador (agente_pc.py) que suba los archivos más recientes y espera la
+    respuesta. Solo con GitHub configurado."""
+    import time
+    import uuid
+    cfg = gh_cfg()
+    sid = uuid.uuid4().hex[:10]
+    try:
+        gh_asegurar_rama(cfg)
+        gh_escribir(cfg, f"{RUTA_GH}/solicitud.json",
+                    json.dumps({"id": sid, "hora": _ahora()}).encode("utf-8"),
+                    "Solicitud de actualización")
+    except Exception as e:  # noqa: BLE001
+        st.error(f"No pude enviar la solicitud: {e}")
+        return
+    espera = 180
+    barra = st.progress(0.0, text="Pidiendo los datos al computador…")
+    t0 = time.time()
+    while time.time() - t0 < espera:
+        time.sleep(5)
+        try:
+            crudo = gh_leer(cfg, f"{RUTA_GH}/meta.json")
+            meta = json.loads(crudo) if crudo else {}
+        except Exception:  # noqa: BLE001
+            meta = {}
+        if meta.get("solicitud") == sid:
+            mem = _memoria_pub()
+            for k in [k for k in mem if str(k).startswith("f_")]:
+                mem.pop(k)
+            mem["meta"], mem["_t"] = meta, time.time()
+            barra.progress(1.0, text="Datos actualizados.")
+            st.rerun()
+        barra.progress(min((time.time() - t0) / espera, 0.99),
+                       text="Esperando que el computador envíe los archivos…")
+    barra.empty()
+    st.warning("El computador no respondió en 3 minutos. Revisa que esté encendido y con el "
+               "agente abierto. Mientras tanto se muestran los últimos datos publicados.")
 
 
 def pub_zip() -> bytes:
@@ -1478,6 +1610,26 @@ PANTALLA_TSS = "📨 Concepto TSS"
 with st.sidebar:
     pantalla = st.radio("Pantalla", [PANTALLA_DASH, PANTALLA_TSS], key="pantalla")
 ES_ADMIN = es_administrador()
+try:
+    _AGENTE = bool(gh_cfg() and st.secrets.get("AGENTE_PC", False))
+except Exception:  # noqa: BLE001
+    _AGENTE = False
+with st.sidebar:
+    _clic_actualizar = False
+    if _AGENTE:
+        _clic_actualizar = st.button("🔄 Actualizar datos desde el computador",
+                                     key="btn_actualizar", width="stretch", type="primary",
+                                     help="Le pide al computador de quien administra la app que "
+                                          "envíe los archivos más recientes. Tarda 1 o 2 minutos.")
+        _ult = pub_meta().get("publicado")
+        if _ult:
+            st.caption(f"Última actualización: {_ult}")
+        _org = pub_meta().get("origen", {})
+        if _org:
+            st.caption("Archivos de origen: " + " · ".join(
+                f"{k} ({o.get('modificado', '—')})" for k, o in _org.items()))
+if _clic_actualizar:
+    solicitar_actualizacion()
 if pantalla == PANTALLA_TSS:
     pantalla_concepto_tss()
     st.stop()
@@ -1561,7 +1713,8 @@ if modo_arch:
     sitios = list(leer_lista(f_sitios.getvalue(), f_sitios.name)) if f_sitios else []
     sitios = limpiar_sitios(sitios + txt_sitios.splitlines())
     if not sitios and pub_archivo("sitios") is not None:
-        sitios = limpiar_sitios(_decodificar_pub(pub_archivo("sitios").getvalue()).splitlines())
+        _sp = pub_archivo("sitios")
+        sitios = limpiar_sitios(list(leer_lista(_sp.getvalue(), _sp.name)))
     f_rf = f_rf or pub_archivo("rf")
     f_bl = f_bl or pub_archivo("baseline")
     if not (f_rf and f_bl and sitios):
