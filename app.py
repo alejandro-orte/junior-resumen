@@ -629,11 +629,30 @@ def planes_disponibles(rf_bytes: bytes, rf_nombre: str, sitios: tuple) -> list:
     return list(vc.index)
 
 
-def cw_nokia(r: pd.DataFrame, col) -> pd.Series:
-    """Trabajos cuya CW Lista dice «Nokia» (en csv/html se guardó aparte al leer)."""
+TIPO_CW_OK = ("nokia", "conjunta")          # «Tipo CW» que da por lista la obra civil sin fecha
+TIPO_CW_NA = {"n/a", "na", "n.a", "n.a.", "n a"}
+
+
+def tipo_cw_ok(v) -> bool:
+    """Tipo CW Nokia, Conjunta o N/A: la obra civil no depende de una fecha de CW Lista."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return False
+    t = _plano(v)
+    return any(x in t for x in TIPO_CW_OK) or t in TIPO_CW_NA
+
+
+def cw_nokia(r: pd.DataFrame, col, mrf: dict | None = None) -> pd.Series:
+    """Trabajos que cuentan como CW Lista OK aunque no tengan fecha:
+    • CW Lista dice «Nokia» (en csv/html se guardó aparte al leer), o
+    • «Tipo CW» es Nokia, Conjunta o N/A."""
     if "__cw_nokia" in r.columns:
-        return r["__cw_nokia"].fillna(False).astype(bool)
-    return r[col].map(es_nokia)
+        ok = r["__cw_nokia"].fillna(False).astype(bool)
+    else:
+        ok = r[col].map(es_nokia)
+    c_tipo = (mrf or {}).get("tipo cw")
+    if c_tipo is not None and c_tipo in r.columns:
+        ok = ok | r[c_tipo].map(tipo_cw_ok)
+    return ok
 
 
 @st.cache_data(show_spinner="Calculando…")
@@ -672,7 +691,7 @@ def procesar_archivos(rf_bytes, rf_nombre, bl_bytes, bl_nombre, sitios: tuple, p
         f = pd.DataFrame({"_k": r["_k"], "f": r[col].map(a_fecha)})
         f["v"] = f["f"].notna()
         if clave_h == "OBRA CIVIL OK":
-            f["v"] = f["v"] | cw_nokia(r, col).values
+            f["v"] = f["v"] | cw_nokia(r, col, mrf).values
         ag = f.groupby("_k").agg(count=("v", "sum"), max=("f", "max"))
         ok = (ag["count"] == n_jobs.reindex(ag.index)) & (ag["count"] > 0)
         det["ok_" + clave_h] = [bool(ok.get(k, False)) for k in claves]
@@ -691,7 +710,7 @@ def procesar_archivos(rf_bytes, rf_nombre, bl_bytes, bl_nombre, sitios: tuple, p
         else:
             f3 = pd.DataFrame({i: r[c].map(a_fecha) for i, c in enumerate(cols3)})
             v3 = f3.notna()
-            v3[1] = v3[1] | cw_nokia(r, cols3[1])  # CW Lista: «Nokia» cuenta como OK
+            v3[1] = v3[1] | cw_nokia(r, cols3[1], mrf)  # CW Lista sin fecha: Nokia / Conjunta / N/A cuenta como OK
             job_ok = v3.all(axis=1)
             tmp = pd.DataFrame({"_k": r["_k"], "ok": job_ok, "f": f3.max(axis=1).where(job_ok)})
             ag = tmp.groupby("_k").agg(n_ok=("ok", "sum"), mx=("f", "max"))
