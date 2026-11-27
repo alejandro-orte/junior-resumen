@@ -2380,7 +2380,7 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
     y_meta = (y_ok + y_nok) / 2
     con_chips = len(regiones) > 1
     y_top = R + (1.75 if con_chips else 0.85)
-    extra_t = 34 if con_chips else 0      # espacio extra arriba para el nombre de la región
+    extra_t = 0
     alto = int(max(600, 80 * (R + 1) + 120 + (60 if con_chips else 0)) * escala) + int(extra_t * escala)
     px_y = (alto - (90 + extra_t) * escala) / (y_top - 0.15)               # píxeles por unidad vertical (aprox.)
     rx, ry = 10 * escala * 100 / 1400, 10 * escala / px_y   # esquinas de ~10 px
@@ -2462,6 +2462,29 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
             xs_clic.append(fx); ys_clic.append(y); claves_clic.append(clave)
             textos.append(f"<b>{etq}</b><br>{n:,} sitios · {pc:.0f}% de la meta")
 
+    # Nombre de la región que se está viendo, sobre la caja Meta
+    if con_chips:
+        nombre_reg = "Todas las regiones" if region_sel == "Todas" else region_sel
+        hb = 1.5                                   # alto de la etiqueta (unidades y)
+        yb0 = y_meta + h / 2 + 0.55                # base, con un pequeño espacio sobre Meta
+        ya_, yb_ = yb0, yb0 + hb
+        x0_, x1_ = META[0], META[1]
+        formas.append(dict(
+            type="path", layer="below",
+            path=(f"M {x0_ + rx},{ya_} L {x1_ - rx},{ya_} Q {x1_},{ya_} {x1_},{ya_ + ry} "
+                  f"L {x1_},{yb_ - ry} Q {x1_},{yb_} {x1_ - rx},{yb_} L {x0_ + rx},{yb_} "
+                  f"Q {x0_},{yb_} {x0_},{yb_ - ry} L {x0_},{ya_ + ry} Q {x0_},{ya_} {x0_ + rx},{ya_} Z"),
+            fillcolor="#e2231a", line=dict(color="#ffffff", width=2)))
+        yc_ = (ya_ + yb_) / 2
+        hb_px = hb * px_y
+        anot.append(dict(x=(x0_ + x1_) / 2, y=yc_, yshift=0.24 * hb_px, text="<b>REGIÓN</b>",
+                         showarrow=False, font=dict(size=min(13 * escala, 0.2 * hb_px), color="#ffd2cf"),
+                         xanchor="center", yanchor="middle"))
+        tam_reg = min(24, 190 / (0.58 * max(len(nombre_reg), 1))) * escala
+        anot.append(dict(x=(x0_ + x1_) / 2, y=yc_, yshift=-0.14 * hb_px, text=f"<b>{nombre_reg}</b>",
+                         showarrow=False, font=dict(size=min(tam_reg, 0.34 * hb_px), color="#ffffff"),
+                         xanchor="center", yanchor="middle"))
+
     # Selector de región dentro del gráfico (casillas clicables)
     if con_chips:
         regs = ["Todas"] + list(regiones)
@@ -2504,10 +2527,6 @@ def arbol_meta(titulo_txt, etiqueta_meta, n_meta, n_ok, n_nok, hijos_ok, hijos_n
         text=textos, hovertemplate="%{text}<extra></extra>"))
 
     texto_titulo = f"<b>{titulo_txt}</b>"
-    if con_chips:
-        nombre_reg = "Todas las regiones" if region_sel == "Todas" else region_sel
-        texto_titulo += (f"<br><span style='font-size:{int(19 * escala)}px'>"
-                         f"Región: <b>{nombre_reg}</b></span>")
     anot.append(dict(xref="paper", yref="paper", x=0.5, y=1.0, text=texto_titulo,
                      showarrow=False, font=dict(size=min(30 * escala, 36), color="#ffffff"), bgcolor="#e2231a",
                      bordercolor="#ffffff", borderwidth=2, borderpad=10, yanchor="bottom"))
