@@ -699,6 +699,22 @@ def procesar_archivos(rf_bytes, rf_nombre, bl_bytes, bl_nombre, sitios: tuple, p
                                         for k in claves]
     det["ok_TOTAL SITIOS"] = True
 
+    # Por qué una obra civil cuenta como lista sin fecha (CW Lista «Nokia» o Tipo CW Nokia/Conjunta/N/A)
+    det["CW sin fecha por"] = ""
+    c_cw = next((mrf[c] for c in HITO_RF["OBRA CIVIL OK"] if c in mrf), None)
+    if c_cw is not None and len(r):
+        sin_fecha = r[c_cw].map(a_fecha).isna()
+        txt_nok = (r["__cw_nokia"].fillna(False).astype(bool) if "__cw_nokia" in r.columns
+                   else r[c_cw].map(es_nokia))
+        c_tipo = mrf.get("tipo cw")
+        tipo_ok = r[c_tipo].map(tipo_cw_ok) if c_tipo in r.columns else pd.Series(False, index=r.index)
+        motivo = pd.Series("", index=r.index)
+        motivo[sin_fecha & tipo_ok] = "Tipo CW " + r.loc[sin_fecha & tipo_ok, c_tipo].astype(str).str.strip()
+        motivo[sin_fecha & txt_nok] = "CW Lista Nokia"
+        por_sitio = motivo.groupby(r["_k"]).agg(lambda x: ", ".join(sorted({v for v in x if v})))
+        det["CW sin fecha por"] = [por_sitio.get(k, "") if det_ok else ""
+                                   for k, det_ok in zip(claves, det["ok_OBRA CIVIL OK"])]
+
     # RFIC-OK combinado: cada trabajo debe tener fecha en TSS ok, CW Lista y Orden Tx
     if criterio == RFIC_COMBINADO:
         cols3 = [next((mrf[c] for c in HITO_RF[k] if c in mrf), None)
@@ -901,8 +917,8 @@ def obtener_lista(ver, terr_sel, modo):
     if col_fecha:
         columnas.append(col_fecha)
     columnas += [c for c in COLS_DETALLE if c != col_fecha]
-    columnas += [c for c in ("Carga", "Autorización", "Scope")
-                 if (d[c].astype(str).str.strip() != "").any()]
+    columnas += [c for c in ("CW sin fecha por", "Carga", "Autorización", "Scope")
+                 if c in d.columns and (d[c].astype(str).str.strip() != "").any()]
     d = d[columnas].sort_values(["Territorio", "Sitio"])
     return d, titulo_lista, col_fecha
 
@@ -2838,15 +2854,35 @@ with tab_p:
             fig_t, mapa_nodos = arbol_meta(titulo_arbol, meta_p, n_meta, n_ok, n_meta - n_ok,
                                            hijos_ok, hijos_nok, list(sel_terr), region_p,
                                            escala_p, logo_uri, spi_uri)
-            pto = leer_click(grafico_clic(fig_t, "clk_arbol"), "clk_arbol")
+            # La clave del gráfico cambia después de cada clic atendido: así la casilla clicada
+            # no queda "seleccionada" y volver a pulsarla (o pulsar la misma tras cerrar la
+            # ventana) cuenta como un clic nuevo y no como "quitar la selección".
+            n_clk = st.session_state.get("_arbol_n", 0)
+            k_arbol = f"clk_arbol_{n_clk}"
+            pto = leer_click(grafico_clic(fig_t, k_arbol), k_arbol)
             if pto:
                 clave_n = mapa_nodos.get((round(float(pto.get("x", -1)), 3),
                                           round(float(pto.get("y", -1)), 3)))
+                if clave_n is None and mapa_nodos:
+                    # el punto llegó con coordenadas ligeramente distintas: se toma la casilla más cercana
+                    try:
+                        px_, py_ = float(pto.get("x", -1)), float(pto.get("y", -1))
+                        clave_n = min(mapa_nodos.items(),
+                                      key=lambda kv: (kv[0][0] - px_) ** 2 + (kv[0][1] - py_) ** 2)[1]
+                    except (TypeError, ValueError):
+                        clave_n = None
                 if clave_n and clave_n.startswith("reg::"):
                     st.session_state["_pres_region"] = clave_n[5:]
+                    st.session_state["_arbol_n"] = n_clk + 1
                     st.rerun()
                 elif clave_n:
-                    ir_a_detalle("t4", PREFIJO_PRES + clave_n, region_p if region_p != "Todas" else "Todos")
+                    st.session_state["_abrir_t4"] = (PREFIJO_PRES + clave_n,
+                                                     region_p if region_p != "Todas" else "Todos")
+                    st.session_state["_arbol_n"] = n_clk + 1
+                    st.rerun()
+            _ab = st.session_state.pop("_abrir_t4", None)
+            if _ab:
+                ir_a_detalle("t4", _ab[0], _ab[1])
             fuera = len(dreg) - n_meta
             if fuera > 0:
                 pista(f"La lista tiene {len(dreg):,} sitios; {fuera:,} quedan fuera de la meta "
