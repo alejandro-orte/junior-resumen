@@ -1183,6 +1183,51 @@ def pub_archivo(clave):
     return ArchivoPub(nombre, datos)
 
 
+ETIQ_ARCHIVO = {"sitios": "Lista de sitios", "rf": "Reporte RF", "baseline": "Baseline",
+                "spi": "SPI semanal", "concepto": "Concepto TSS pendientes"}
+ORDEN_ARCHIVO = ["rf", "baseline", "sitios", "spi", "concepto"]
+
+
+def _edad_dias(texto):
+    """Días transcurridos desde una fecha 'dd/mm/aaaa hh:mm' (hora de Bogotá); None si no se entiende."""
+    try:
+        f = datetime.datetime.strptime(str(texto).strip(), "%d/%m/%Y %H:%M")
+    except ValueError:
+        return None
+    ahora = datetime.datetime.now(ZoneInfo("America/Bogota")).replace(tzinfo=None)
+    return max((ahora - f).total_seconds() / 86400, 0)
+
+
+def fechas_archivos():
+    """Una fila por archivo publicado: etiqueta, nombre, fecha del archivo en el PC y fecha en que se subió."""
+    meta = pub_meta()
+    arch, org, sub = meta.get("archivos", {}), meta.get("origen", {}), meta.get("subidos", {})
+    filas = []
+    for clave in sorted(arch, key=lambda c: (ORDEN_ARCHIVO.index(c) if c in ORDEN_ARCHIVO else 99, c)):
+        o = org.get(clave, {})
+        subido = sub.get(clave) or meta.get("publicado") or "—"
+        fecha = o.get("modificado") or subido
+        dias = _edad_dias(fecha)
+        filas.append({"clave": clave, "etiqueta": ETIQ_ARCHIVO.get(clave, clave),
+                      "archivo": o.get("archivo") or arch[clave], "fecha": fecha,
+                      "subido": subido, "dias": dias})
+    return filas
+
+
+def texto_edad(dias):
+    if dias is None:
+        return ""
+    if dias < 1 / 24:
+        return "hace minutos"
+    if dias < 1:
+        return f"hace {int(dias * 24)} h"
+    return f"hace {int(dias)} día(s)"
+
+
+def marca_vigencia(dias, limite=2):
+    return "⚠️" if dias is not None and dias >= limite else "✅"
+
+
 def pub_guardar(entradas: dict, extra: dict):
     """entradas: {clave: (nombre_original, bytes)}. Con GitHub configurado se guarda allí
     (queda permanente); si no, en memoria y en disco (se pierde al reiniciar la app)."""
@@ -1191,6 +1236,7 @@ def pub_guardar(entradas: dict, extra: dict):
     meta = json.loads(json.dumps(pub_meta())) if pub_meta() else {}
     meta.setdefault("archivos", {})
     meta.setdefault("versiones", {})
+    meta.setdefault("subidos", {})
     cfg = gh_cfg()
     aviso = None
     if cfg:
@@ -1207,6 +1253,8 @@ def pub_guardar(entradas: dict, extra: dict):
         guardado = f"{clave}{Path(nombre).suffix.lower() or '.dat'}"
         meta["archivos"][clave] = guardado
         meta["versiones"][clave] = hashlib.sha1(datos).hexdigest()[:10]
+        meta["subidos"][clave] = _ahora()
+        meta.setdefault("origen", {}).pop(clave, None)   # subido a mano: no hay fecha de archivo del PC
         try:
             if cfg:
                 gh_escribir(cfg, f"{RUTA_GH}/{guardado}", datos, f"Datos publicados: {guardado}")
@@ -1756,10 +1804,16 @@ with st.sidebar:
         _ult = pub_meta().get("publicado")
         if _ult:
             st.caption(f"Última actualización: {_ult}")
-        _org = pub_meta().get("origen", {})
-        if _org:
-            st.caption("Archivos de origen: " + " · ".join(
-                f"{k} ({o.get('modificado', '—')})" for k, o in _org.items()))
+    _fa = fechas_archivos()
+    if _fa:
+        st.markdown("**🕒 Fecha de los archivos**")
+        for _f in _fa:
+            st.markdown(f"{marca_vigencia(_f['dias'])} **{_f['etiqueta']}** · {_f['fecha']}  \n"
+                        f"<span style='opacity:.65;font-size:.8em'>{_f['archivo']}"
+                        f"{' · ' + texto_edad(_f['dias']) if _f['dias'] is not None else ''}"
+                        f"</span>", unsafe_allow_html=True)
+        st.caption("⚠️ = el archivo tiene 2 días o más. «Fecha» es la del archivo en el computador "
+                   "de quien administra; «Última actualización» es cuándo se envió a la app.")
 if _clic_actualizar:
     solicitar_actualizacion()
 if pantalla == PANTALLA_TSS:
@@ -1852,6 +1906,10 @@ _t1.title("📡 Dashboard Resumen · Modernización")
 presentacion = _t2.toggle("🎞️ Modo presentación", key="presentacion",
                           help="Oculta la barra lateral, las ayudas y los botones para "
                                "proyectar o capturar el tablero.")
+_fa_top = fechas_archivos()
+if _fa_top:
+    st.caption("🕒 Archivos: " + " · ".join(
+        f"{marca_vigencia(f['dias'])} {f['etiqueta']} {f['fecha']}" for f in _fa_top))
 if presentacion:
     st.markdown("<style>[data-testid='stSidebar'],[data-testid='stSidebarCollapsedControl'],"
                 "[data-testid='collapsedControl'],[data-testid='stHeader'],header"
